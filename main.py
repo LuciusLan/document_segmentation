@@ -20,7 +20,7 @@ TRAIN_PATH = './/train'
 TEST_PATH = './/test'
 TRAIN_LABEL = './/train.csv'
 SUBMISSION = './/sample_submission.csv'
-TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096", add_prefix_space=True)
+TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
 # Add special token for new paragraph
 TOKENIZER.add_special_tokens({'additional_special_tokens': ['[NP]']})
 LABEL_2_ID = {'Claim': 1, 'Evidence': 2, 'Position': 3,
@@ -47,9 +47,11 @@ for f in tqdm(list(os.listdir(TEST_PATH))):
 
 train_labels = pd.read_csv(TRAIN_LABEL)
 
+
 def del_list_idx(l, id_to_del):
     arr = np.array(l, dtype='int32')
     return list(np.delete(arr, id_to_del))
+
 
 scope_len = len(all_doc_ids)
 train_len = math.floor((1 - TEST_SIZE - DEV_SIZE) * scope_len)
@@ -66,11 +68,11 @@ dev_index = scope_index.copy()
 def preprocessing_train(labels: pd.DataFrame, raw_text: str) -> "tuple[list]":
     """
     Tokenization for training. Insert [NP] tokens at new paragraph
-    
+
     Args:
         labels: the DataFrame containing label information.
         raw_text: the raw text input as string
-    
+
     Returns:
         new_segements: list of encoded tokenized inputs, organized in segments
         discourse_type: list of segments' type
@@ -100,7 +102,8 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str) -> "tuple[list]":
             hold_count += 1
             new_segements.append(hold_seg_ids)
             subword_mask.append(hold_subword_mask)
-        seg = raw_text[int(segment['discourse_start']): int(segment['discourse_end'])]
+        seg = raw_text[int(segment['discourse_start'])
+                           : int(segment['discourse_end'])]
         if re.search('\n+', raw_text[int(segment['discourse_start'])-4:int(segment['discourse_start'])]):
             seg = '[NP] '+seg
         seg = re.sub('\n+', ' [NP] ', seg)
@@ -151,23 +154,22 @@ def preprocessing_test(raw_text: str) -> "tuple[list]":
     return ids, subword_mask
 
 
-
 class DocFeature():
     def __init__(self, doc_id: str, raw_text: str, train_or_test: str, seg_labels=None) -> None:
         self.doc_id = doc_id
         if train_or_test == 'train':
-            self.segments, self.seg_labels = preprocessing_train(
-                doc_id, seg_labels, raw_text)
+            self.input_ids, self.seg_labels, self.subword_masks = preprocessing_train(
+                seg_labels, raw_text)
             label_ids = [LABEL_2_ID[seg] for seg in self.seg_labels]
             self.labels = [[label]*len(seg)
-                           for seg, label in zip(self.segments, label_ids)]
+                           for seg, label in zip(self.input_ids, label_ids)]
             self.labels = list(itertools.chain.from_iterable(self.labels))
         elif train_or_test == 'test':
-            self.segments = preprocessing_test(doc_id, raw_text)
+            self.input_ids, self.subword_masks = preprocessing_test(raw_text)
         else:
             raise NameError('Should be either train/test')
-        self.tokens = list(itertools.chain.from_iterable(self.segments))
-        self.input_ids = TOKENIZER.convert_tokens_to_ids(self.tokens)
+        self.input_ids = list(itertools.chain.from_iterable(self.input_ids))
+        self.subword_masks = list(itertools.chain.from_iterable(self.subword_masks))
 
 
 train_doc_ids = [all_doc_ids[i] for i in train_index]
@@ -177,16 +179,13 @@ train_doc_texts = [all_doc_texts[i] for i in train_index]
 dev_doc_texts = [all_doc_texts[i] for i in dev_index]
 temp_test_doc_texts = [all_doc_texts[i] for i in test_index]
 
-t = DocFeature(doc_id='0A0AA9C21C5D', seg_labels=train_labels.loc[train_labels['id'] == '0A0AA9C21C5D'],
-                             raw_text=all_doc_texts[all_doc_ids.index('0A0AA9C21C5D')], train_or_test='train')
-
-train_features = [DocFeature(seg_labels=train_labels.loc[train_labels['id'] == ids],
+train_features = [DocFeature(doc_id=ids, seg_labels=train_labels.loc[train_labels['id'] == ids],
                              raw_text=train_doc_texts[train_doc_ids.index(ids)], train_or_test='train') for ids in tqdm(train_doc_ids)]
-dev_features = [DocFeature(seg_labels=train_labels.loc[train_labels['id'] == ids],
+dev_features = [DocFeature(doc_id=ids, seg_labels=train_labels.loc[train_labels['id'] == ids],
                            raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train') for ids in dev_doc_ids]
-temp_test_features = [DocFeature(seg_labels=train_labels.loc[train_labels['id'] == ids],
+temp_test_features = [DocFeature(doc_id=ids, seg_labels=train_labels.loc[train_labels['id'] == ids],
                                  raw_text=temp_test_doc_texts[temp_test_doc_ids.index(ids)], train_or_test='train') for ids in temp_test_doc_ids]
-test_features = [DocFeature(raw_text=test_doc_texts[test_doc_ids.index(
+test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.index(
     ids)], train_or_test='test') for ids in test_doc_ids]
 
 
