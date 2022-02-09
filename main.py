@@ -10,6 +10,7 @@ import nltk
 
 import itertools
 import concurrent.futures
+import six
 import random
 import os
 import re
@@ -19,9 +20,11 @@ TRAIN_PATH = './/train'
 TEST_PATH = './/test'
 TRAIN_LABEL = './/train.csv'
 SUBMISSION = './/sample_submission.csv'
-TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
+TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096", add_prefix_space=True)
+# Add special token for new paragraph
+TOKENIZER.add_special_tokens({'additional_special_tokens': ['[NP]']})
 LABEL_2_ID = {'Claim': 1, 'Evidence': 2, 'Position': 3,
-              'Concluding Statement': 4, 'Lead': 5, 'Counterclaim': 6, 'Rebuttal': 7}
+              'Concluding Statement': 4, 'Lead': 5, 'Counterclaim': 6, 'Rebuttal': 7, 'non': 8}
 TEST_SIZE = 0.1
 DEV_SIZE = 0.1
 MAX_LEN = 1024
@@ -60,40 +63,93 @@ scope_index = del_list_idx(scope_index, test_index)
 dev_index = scope_index.copy()
 
 
-def preprocessing_train(doc_id: str, labels: pd.DataFrame, raw_text: str) -> "tuple[list, pd.Series]":
+def preprocessing_train(labels: pd.DataFrame, raw_text: str) -> "tuple[list]":
+    """
+    Tokenization for training. Insert [NP] tokens at new paragraph
+    
+    Args:
+        labels: the DataFrame containing label information.
+        raw_text: the raw text input as string
+    
+    Returns:
+        new_segements: list of encoded tokenized inputs, organized in segments
+        discourse_type: list of segments' type
+        subword_mask: list of subword masks (for post-processing)
+    """
     new_segements = []
-    for row_num, segment in labels.iterrows():
-        seg = []
-        seg_subwords = []
-        ids = segment['predictionstring'].split(' ')
-        ids = [int(e) for e in ids]
+    prev_start = -1
+    hold_count = 0
+    discourse_type = labels['discourse_type'].to_list()
+    row_num = 0
+    subword_mask = []
+    for _, segment in labels.iterrows():
+        seg_ids = []
+        seg_subword_mask = []
+        # Find is there any text before current discourse start and previous discourse end
+        if prev_start + 1 != int(segment['discourse_start']) and prev_start != int(segment['discourse_start']):
+            hold_seg = raw_text[prev_start+1: int(segment['discourse_start'])]
+            discourse_type.insert(hold_count+row_num, 'non')
+            hold_seg_ids = []
+            hold_subword_mask = []
+            temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
+            # BERT tokenization
+            for sent in temp_sents:
+                tokenized_hold = TOKENIZER(sent)
+                hold_seg_ids.extend(tokenized_hold['input_ids'])
+                hold_subword_mask.extend(tokenized_hold.word_ids(0))
+            hold_count += 1
+            new_segements.append(hold_seg_ids)
+            subword_mask.append(hold_subword_mask)
         seg = raw_text[int(segment['discourse_start']): int(segment['discourse_end'])]
         if re.search('\n+', raw_text[int(segment['discourse_start'])-4:int(segment['discourse_start'])]):
-            seg = '[CLS] '+seg
-        seg = re.sub('\n+', ' [CLS] ', seg)
-        # Find position of end of sent, augment with [SEP] token
+            seg = '[NP] '+seg
+        seg = re.sub('\n+', ' [NP] ', seg)
         temp_sents = nltk.tokenize.sent_tokenize(seg)
-        temp_sents = [sent+' [SEP]' for sent in temp_sents]
         # BERT tokenization
-        for word in temp_sents:
-            subwords = TOKENIZER.tokenize(word)
-            seg_subwords.extend(subwords)
-        new_segements.append(seg_subwords)
-    assert len(new_segements) == len(labels['discourse_type'])
-    return new_segements, labels['discourse_type']
+        for sent in temp_sents:
+            tokenized_sent = TOKENIZER(sent)
+            seg_ids.extend(tokenized_sent['input_ids'])
+            seg_subword_mask.extend(tokenized_sent.word_ids(0))
+        new_segements.append(seg_ids)
+        subword_mask.append(seg_subword_mask)
+        prev_start = int(segment['discourse_end'])
+        row_num += 1
+
+    # Find is there any text after the last discourse end
+    if int(segment['discourse_end']) < len(raw_text):
+        hold_seg_ids = []
+        hold_subword_mask = []
+        hold_seg = raw_text[int(segment['discourse_end']):]
+        discourse_type.append('non')
+        hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
+        # Find position of end of sent, augment with [SEP] token
+        temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
+        # BERT tokenization
+        for sent in temp_sents:
+            tokenized_hold = TOKENIZER(sent)
+            hold_seg_ids.extend(tokenized_hold['input_ids'])
+            hold_subword_mask.extend(tokenized_hold.word_ids(0))
+        new_segements.append(hold_seg_ids)
+        subword_mask.append(hold_subword_mask)
+    assert len(new_segements) == len(discourse_type) == len(subword_mask)
+    return new_segements, discourse_type, subword_mask
 
 
-def preprocessing_test(doc_id: str, raw_text: str) -> list:
-    new_segements = []
-    raw_text = re.sub('\n+', ' [CLS] ', raw_text)
-    # Find position of end of sent, augment with [SEP] token
+def preprocessing_test(raw_text: str) -> "tuple[list]":
+    """
+    Tokenization or testing (without ground truth), simply tokenize and output subword mask
+    Need to take care of [NP] tokens when decoding
+    """
+    ids = []
+    subword_mask = []
+    raw_text = re.sub('\n+', ' [NP] ', raw_text)
     temp_sents = nltk.tokenize.sent_tokenize(raw_text)
-    temp_sents = [sent+' [SEP]' for sent in temp_sents]
-    # BERT tokenization
-    for word in temp_sents:
-        subwords = TOKENIZER.tokenize(word)
-        new_segements.extend(subwords)
-    return new_segements
+    for sent in temp_sents:
+        tokenized_sent = TOKENIZER(sent)
+        ids.extend(tokenized_sent['input_ids'])
+        subword_mask.extend(tokenized_sent.word_ids(0))
+    return ids, subword_mask
+
 
 
 class DocFeature():
@@ -106,13 +162,10 @@ class DocFeature():
             self.labels = [[label]*len(seg)
                            for seg, label in zip(self.segments, label_ids)]
             self.labels = list(itertools.chain.from_iterable(self.labels))
-        elif train_or_test == 'dev':
-            self.segments = preprocessing_test(doc_id, raw_text)
-            self.seg_labels = seg_labels['discourse_type']
         elif train_or_test == 'test':
             self.segments = preprocessing_test(doc_id, raw_text)
         else:
-            raise NameError('Should be either train/dev/test')
+            raise NameError('Should be either train/test')
         self.tokens = list(itertools.chain.from_iterable(self.segments))
         self.input_ids = TOKENIZER.convert_tokens_to_ids(self.tokens)
 
@@ -124,13 +177,16 @@ train_doc_texts = [all_doc_texts[i] for i in train_index]
 dev_doc_texts = [all_doc_texts[i] for i in dev_index]
 temp_test_doc_texts = [all_doc_texts[i] for i in test_index]
 
-train_features = [DocFeature(doc_id=ids, seg_labels=train_labels.loc[train_labels['id'] == ids],
+t = DocFeature(doc_id='0A0AA9C21C5D', seg_labels=train_labels.loc[train_labels['id'] == '0A0AA9C21C5D'],
+                             raw_text=all_doc_texts[all_doc_ids.index('0A0AA9C21C5D')], train_or_test='train')
+
+train_features = [DocFeature(seg_labels=train_labels.loc[train_labels['id'] == ids],
                              raw_text=train_doc_texts[train_doc_ids.index(ids)], train_or_test='train') for ids in tqdm(train_doc_ids)]
-dev_features = [DocFeature(doc_id=ids, seg_labels=train_labels.loc[train_labels['id'] == ids],
-                           raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='dev') for ids in dev_doc_ids]
-temp_test_features = [DocFeature(doc_id=ids, seg_labels=train_labels.loc[train_labels['id'] == ids],
-                                 raw_text=temp_test_doc_texts[temp_test_doc_ids.index(ids)], train_or_test='dev') for ids in temp_test_doc_ids]
-test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.index(
+dev_features = [DocFeature(seg_labels=train_labels.loc[train_labels['id'] == ids],
+                           raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train') for ids in dev_doc_ids]
+temp_test_features = [DocFeature(seg_labels=train_labels.loc[train_labels['id'] == ids],
+                                 raw_text=temp_test_doc_texts[temp_test_doc_ids.index(ids)], train_or_test='train') for ids in temp_test_doc_ids]
+test_features = [DocFeature(raw_text=test_doc_texts[test_doc_ids.index(
     ids)], train_or_test='test') for ids in test_doc_ids]
 
 
@@ -306,6 +362,7 @@ config = AutoConfig.from_pretrained("allenai/longformer-base-4096")
 config.num_labels = 8
 model = TModel.from_pretrained(
     "allenai/longformer-base-4096", cached_path="D:\\Dev\\Longformer\\").cuda()
+model.resize_token_embeddings(len(TOKENIZER))
 criterion = nn.CrossEntropyLoss(ingore_index=0)
 
 bert_param_optimizer = list(model.transformer.named_parameters())
