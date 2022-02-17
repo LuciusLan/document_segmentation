@@ -3,3 +3,5 @@
 *.zip
 *.pt
 /.vscode
+/__pycache__
+/data_other
