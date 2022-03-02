@@ -39,7 +39,7 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         if prev_end + 1 != int(segment['discourse_start']) and prev_end != int(segment['discourse_start']):
             hold_seg = raw_text[prev_end+1: int(segment['discourse_start'])]
 
-            hold_seg = re.sub('\n*', ' [NP] ', hold_seg)
+            hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
             tokenized_hold = tokenizer(hold_seg)
             hold_seg_ids = tokenized_hold['input_ids']
             hold_subword_mask = tokenized_hold.word_ids(0)
@@ -49,14 +49,14 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
             if not re_eos.search(hold_seg):
                 hold_seg_ids = hold_seg_ids[:-1]
                 hold_subword_mask = hold_subword_mask[:-1]
-            hold_seg_labels = [0]*len(hold_seg_ids)
+            hold_seg_labels = [8]*len(hold_seg_ids)
             new_segements.append(hold_seg_ids)
             subword_mask.append(hold_subword_mask)
             seg_labels.append(hold_seg_labels)
 
         seg = raw_text[int(segment['discourse_start']) : int(segment['discourse_end'])]
         # Insert special token for New Paragraph (strong indicator for boundary)
-        seg = re.sub('\n*', ' [NP] ', seg)
+        seg = re.sub('\n+', ' [NP] ', seg)
 
         tokenized_sent = tokenizer(seg)
         seg_ids = tokenized_sent['input_ids']
@@ -79,7 +79,7 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         hold_seg_ids = []
         hold_subword_mask = []
         hold_seg = raw_text[int(segment['discourse_end']):]
-        hold_seg = re.sub('\n*', ' [NP] ', hold_seg)
+        hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
         tokenized_hold = tokenizer(hold_seg)
         hold_seg_ids = tokenized_hold['input_ids']
         hold_subword_mask = tokenized_hold.word_ids(0)
@@ -89,7 +89,7 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         if not re_eos.search(hold_seg):
             hold_seg_ids = hold_seg_ids[:-1]
             hold_subword_mask = hold_subword_mask[:-1]
-        hold_seg_labels = [0]*len(hold_seg_ids)
+        hold_seg_labels = [8]*len(hold_seg_ids)
         new_segements.append(hold_seg_ids)
         subword_mask.append(hold_subword_mask)
         seg_labels.append(hold_seg_labels)
@@ -118,10 +118,9 @@ class DocFeature():
         if train_or_test == 'train':
             self.input_ids, self.seg_labels, self.subword_masks = preprocessing_train(
                 labels=seg_labels, raw_text=raw_text, tokenizer=tokenizer)
-            label_ids = [LABEL_2_ID[seg] for seg in self.seg_labels]
             #self.labels = [[label]*len(seg) for seg, label in zip(self.input_ids, label_ids)]
             self.labels = [self.convert_label_to_bio(label, len(
-                seg)) for seg, label in zip(self.input_ids, label_ids)]
+                seg)) for seg, label in zip(self.input_ids, self.seg_labels)]
             self.labels = list(itertools.chain.from_iterable(self.labels))
             self.input_ids = list(
                 itertools.chain.from_iterable(self.input_ids))
@@ -138,17 +137,17 @@ class DocFeature():
         self.cls_pos = np.where(self.input_ids==tokenizer.cls_token_id)
 
     def convert_label_to_bio(self, label, seq_len):
-        if label != 8:
-            temp = [LABEL_BIO[f'I{label}']]*seq_len
-            temp[0] = LABEL_BIO[f'B{label}']
+        if label[0] != 8:
+            temp = [LABEL_BIO[f'I{label[0]}']]*seq_len
+            temp[0] = LABEL_BIO[f'B{label[0]}']
         else:
             temp = [LABEL_BIO['O']]*seq_len
         return temp
     
     def get_sent_level_label(self):
-        self.labels_sent = []
-        for sent in self.labels:
-            pass
+        prev_cls = 0
+        for pos in self.cls_pos:
+            print()
 
 
 def pad_sequences(sequences, maxlen=None, dtype='int32',
