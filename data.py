@@ -9,6 +9,10 @@ import re
 import itertools
 import six
 
+sent_tok = nltk.data.load(f"tokenizers/punkt/English.pickle")
+re_bos = re.compile(r'^\s?[A-Z]{1}[a-z]+\s?[a-z]*')
+re_eos = re.compile(r'[?\.!]$')
+
 def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tuple[list]":
     """
     Tokenization for training. Insert [NP] tokens at new paragraph
@@ -23,42 +27,51 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         subword_mask: list of subword masks (for post-processing)
     """
     new_segements = []
-    prev_start = -1
-    hold_count = 0
-    discourse_type = labels['discourse_type'].to_list()
+    prev_end = -1
     row_num = 0
     subword_mask = []
+    seg_labels = []
+    raw_text = raw_text.replace('\xa0', ' ')
     for _, segment in labels.iterrows():
         seg_ids = []
         seg_subword_mask = []
         # Find is there any text before current discourse start and previous discourse end
-        if prev_start + 1 != int(segment['discourse_start']) and prev_start != int(segment['discourse_start']):
-            hold_seg = raw_text[prev_start+1: int(segment['discourse_start'])]
-            discourse_type.insert(hold_count+row_num, 'non')
-            hold_seg_ids = []
-            hold_subword_mask = []
-            temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
-            # BERT tokenization
-            for sent in temp_sents:
-                tokenized_hold = tokenizer(sent)
-                hold_seg_ids.extend(tokenized_hold['input_ids'])
-                hold_subword_mask.extend(tokenized_hold.word_ids(0))
-            hold_count += 1
+        if prev_end + 1 != int(segment['discourse_start']) and prev_end != int(segment['discourse_start']):
+            hold_seg = raw_text[prev_end+1: int(segment['discourse_start'])]
+
+            hold_seg = re.sub('\n*', ' [NP] ', hold_seg)
+            tokenized_hold = tokenizer(hold_seg)
+            hold_seg_ids = tokenized_hold['input_ids']
+            hold_subword_mask = tokenized_hold.word_ids(0)
+            if not re_bos.search(hold_seg):
+                hold_seg_ids = hold_seg_ids[1:]
+                hold_subword_mask = hold_subword_mask[1:]
+            if not re_eos.search(hold_seg):
+                hold_seg_ids = hold_seg_ids[:-1]
+                hold_subword_mask = hold_subword_mask[:-1]
+            hold_seg_labels = [0]*len(hold_seg_ids)
             new_segements.append(hold_seg_ids)
             subword_mask.append(hold_subword_mask)
-        seg = raw_text[int(segment['discourse_start'])                       : int(segment['discourse_end'])]
-        if re.search('\n+', raw_text[int(segment['discourse_start'])-4:int(segment['discourse_start'])]):
-            seg = '[NP] '+seg
-        seg = re.sub('\n+', ' [NP] ', seg)
-        temp_sents = nltk.tokenize.sent_tokenize(seg)
-        # BERT tokenization
-        for sent in temp_sents:
-            tokenized_sent = tokenizer(sent)
-            seg_ids.extend(tokenized_sent['input_ids'])
-            seg_subword_mask.extend(tokenized_sent.word_ids(0))
+            seg_labels.append(hold_seg_labels)
+
+        seg = raw_text[int(segment['discourse_start']) : int(segment['discourse_end'])]
+        # Insert special token for New Paragraph (strong indicator for boundary)
+        seg = re.sub('\n*', ' [NP] ', seg)
+
+        tokenized_sent = tokenizer(seg)
+        seg_ids = tokenized_sent['input_ids']
+        seg_subword_mask = tokenized_sent.word_ids(0)
+        if not re_bos.search(seg):
+            seg_ids = seg_ids[1:]
+            seg_subword_mask = seg_subword_mask[1:]
+        if not re_eos.search(seg):
+            seg_ids = seg_ids[:-1]
+            seg_subword_mask = seg_subword_mask[:-1]
+        current_seg_label = [LABEL_2_ID[segment['discourse_type']]]*len(seg_ids)
+        seg_labels.append(current_seg_label) 
         new_segements.append(seg_ids)
         subword_mask.append(seg_subword_mask)
-        prev_start = int(segment['discourse_end'])
+        prev_end = int(segment['discourse_end'])
         row_num += 1
 
     # Find is there any text after the last discourse end
@@ -66,19 +79,21 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         hold_seg_ids = []
         hold_subword_mask = []
         hold_seg = raw_text[int(segment['discourse_end']):]
-        discourse_type.append('non')
-        hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
-        # Find position of end of sent, augment with [SEP] token
-        temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
-        # BERT tokenization
-        for sent in temp_sents:
-            tokenized_hold = tokenizer(sent)
-            hold_seg_ids.extend(tokenized_hold['input_ids'])
-            hold_subword_mask.extend(tokenized_hold.word_ids(0))
+        hold_seg = re.sub('\n*', ' [NP] ', hold_seg)
+        tokenized_hold = tokenizer(hold_seg)
+        hold_seg_ids = tokenized_hold['input_ids']
+        hold_subword_mask = tokenized_hold.word_ids(0)
+        if not re_bos.search(hold_seg):
+            hold_seg_ids = hold_seg_ids[1:]
+            hold_subword_mask = hold_subword_mask[1:]
+        if not re_eos.search(hold_seg):
+            hold_seg_ids = hold_seg_ids[:-1]
+            hold_subword_mask = hold_subword_mask[:-1]
+        hold_seg_labels = [0]*len(hold_seg_ids)
         new_segements.append(hold_seg_ids)
         subword_mask.append(hold_subword_mask)
-    assert len(new_segements) == len(discourse_type) == len(subword_mask)
-    return new_segements, discourse_type, subword_mask
+        seg_labels.append(hold_seg_labels)
+    return new_segements, seg_labels, subword_mask
 
 
 def preprocessing_test(raw_text: str, tokenizer) -> "tuple[list]":
@@ -102,7 +117,7 @@ class DocFeature():
         self.doc_id = doc_id
         if train_or_test == 'train':
             self.input_ids, self.seg_labels, self.subword_masks = preprocessing_train(
-                seg_labels, raw_text, tokenizer=tokenizer)
+                labels=seg_labels, raw_text=raw_text, tokenizer=tokenizer)
             label_ids = [LABEL_2_ID[seg] for seg in self.seg_labels]
             #self.labels = [[label]*len(seg) for seg, label in zip(self.input_ids, label_ids)]
             self.labels = [self.convert_label_to_bio(label, len(
@@ -120,6 +135,7 @@ class DocFeature():
                 0 if e is None else 1 for e in self.subword_masks]
         else:
             raise NameError('Should be either train/test')
+        self.cls_pos = np.where(self.input_ids==tokenizer.cls_token_id)
 
     def convert_label_to_bio(self, label, seq_len):
         if label != 8:
@@ -128,6 +144,11 @@ class DocFeature():
         else:
             temp = [LABEL_BIO['O']]*seq_len
         return temp
+    
+    def get_sent_level_label(self):
+        self.labels_sent = []
+        for sent in self.labels:
+            pass
 
 
 def pad_sequences(sequences, maxlen=None, dtype='int32',
@@ -237,11 +258,13 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
     labels = []
     attention_masks = []
     subword_masks = []
+    cls_pos = []
     for feat in features:
         input_ids.append(feat.input_ids)
         labels.append(feat.labels)
         attention_masks.append([1]*len(feat.input_ids))
         subword_masks.append(feat.subword_masks)
+        cls_pos.append(feat.cls_pos)
     input_ids = pad_sequences(input_ids,
                               maxlen=MAX_LEN, value=0, padding="post",
                               dtype="long", truncating="post").tolist()
