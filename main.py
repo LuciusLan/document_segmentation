@@ -1,5 +1,5 @@
 from params import *
-from data import DocFeature, create_tensor_ds
+from data import DocFeature, create_tensor_ds, create_tensor_ds_sliding_window
 from model import TModel, FocalLoss
 
 import numpy as np
@@ -14,11 +14,12 @@ from tqdm import tqdm
 
 import itertools
 import random
+import re
 import os
 import gc
 import math
 
-TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
+TOKENIZER = AutoTokenizer.from_pretrained("roberta-base")
 # Add special token for new paragraph
 TOKENIZER.add_special_tokens({'additional_special_tokens': ['[NP]']})
 
@@ -45,48 +46,45 @@ def del_list_idx(l, id_to_del):
 
 scope_len = len(all_doc_ids)
 train_len = math.floor((1 - TEST_SIZE - DEV_SIZE) * scope_len)
-test_len = math.floor(TEST_SIZE * scope_len)
-val_len = scope_len - train_len - test_len
+dev_len = scope_len - train_len
 scope_index = list(range(scope_len))
 train_index = random.sample(scope_index, k=train_len)
 scope_index = del_list_idx(scope_index, train_index)
-test_index = random.sample(list(range(len(scope_index))), k=test_len)
-scope_index = del_list_idx(scope_index, test_index)
-dev_index = scope_index.copy()
+dev_index = random.sample(list(range(len(scope_index))), k=dev_len)
 
 
 train_doc_ids = [all_doc_ids[i] for i in train_index]
 dev_doc_ids = [all_doc_ids[i] for i in dev_index]
-temp_test_doc_ids = [all_doc_ids[i] for i in test_index]
 train_doc_texts = [all_doc_texts[i] for i in train_index]
 dev_doc_texts = [all_doc_texts[i] for i in dev_index]
-temp_test_doc_texts = [all_doc_texts[i] for i in test_index]
+
 
 # Due to design of huggingface's tokenizer, not possible to multithread to speed up the loading
 # Better run once and load for future development
-train_features = torch.load('train_features.pt')
-dev_features = torch.load('dev_features.pt')
-temp_test_features = torch.load('temp_test_features.pt')
+#train_features = torch.load('train_features.pt')
+#dev_features = torch.load('dev_features.pt')
+#temp_test_features = torch.load('temp_test_features.pt')
 
-"""
+t = DocFeature(doc_id='6C3B801F92D2', seg_labels=all_labels.loc[all_labels['id'] == '6C3B801F92D2'],
+                             raw_text=all_doc_texts[all_doc_ids.index('6C3B801F92D2')], train_or_test='train', tokenizer=TOKENIZER)
+
+#all_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
+#                             raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
 train_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-                             raw_text=train_doc_texts[train_doc_ids.index(ids)], train_or_test='train') for ids in tqdm(train_doc_ids)]
+                             raw_text=train_doc_texts[train_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(train_doc_ids)]
 dev_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-                           raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train') for ids in dev_doc_ids]
-temp_test_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-                                 raw_text=temp_test_doc_texts[temp_test_doc_ids.index(ids)], train_or_test='train') for ids in temp_test_doc_ids]
+                           raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in dev_doc_ids]
 test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.index(
-    ids)], train_or_test='test') for ids in test_doc_ids]
-"""
+    ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in test_doc_ids]
 
-train_ds = create_tensor_ds(train_features)
-dev_ds = create_tensor_ds(dev_features)
-temp_test_ds = create_tensor_ds(temp_test_features)
+
+train_ds = create_tensor_ds_sliding_window(train_features)
+dev_ds = create_tensor_ds_sliding_window(dev_features)
 train_sp = RandomSampler(train_ds)
 train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp)
 
 
-config = AutoConfig.from_pretrained("allenai/longformer-base-4096")
+config = AutoConfig.from_pretrained("roberta-base")
 config.num_labels = NUM_LABELS
 model = TModel(config=config)
 model = model.to('cuda')
@@ -137,8 +135,9 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-        
+
 for i in range(NUM_EPOCH):
+    torch.cuda.empty_cache()
     model.train()
     pbar = tqdm(total=len(train_dl), desc='Train')
     train_loss = AverageMeter()
