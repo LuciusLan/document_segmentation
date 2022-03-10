@@ -3,15 +3,16 @@ import pandas as pd
 import nltk
 import numpy as np
 import torch
-from torch.utils.data import TensorDataset
+from torch.utils.data import TensorDataset, Dataset
 
 import re
 import itertools
 import six
 
 sent_tok = nltk.data.load(f"tokenizers/punkt/English.pickle")
-re_bos = re.compile(r'^\s?[A-Z]{1}[a-z]+\s?[a-z]*')
-re_eos = re.compile(r'[?\.!]$')
+re_bos = re.compile(r'^\s?\W?(?:(?:[A-Z]{1}[a-z]+)|(?:I))\s?[a-z]*')
+re_eos = re.compile(r'[?\.!]\'?\"?\s*$')
+
 
 def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tuple[list]":
     """
@@ -31,12 +32,23 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
     subword_mask = []
     seg_labels = []
     raw_text = raw_text.replace('\xa0', ' ')
+    raw_text = raw_text.replace('Ã\x82Â´', '\'')
+    raw_text = raw_text.replace('Ã\x85â\x80¢e', ' are')
+    raw_text = raw_text.replace('Ã\x85â\x80º', ' is')
+    prev_eos = True
     for _, segment in labels.iterrows():
         seg_ids = []
         seg_subword_mask = []
         # Find is there any text before current discourse start and previous discourse end
-        if prev_end + 1 != int(segment['discourse_start']) and prev_end != int(segment['discourse_start']):
-            hold_seg = raw_text[prev_end+1: int(segment['discourse_start'])]
+        # Or any text before the first discourse start
+        if (prev_end + 1 != int(segment['discourse_start']) and prev_end != int(segment['discourse_start'])) or (prev_end == -1 and int(segment['discourse_start']) != 0):
+            if prev_end == -1:
+                hold_seg = raw_text[: int(segment['discourse_start'])]
+            elif raw_text[prev_end] in ['.', ' ', '!', '?']:
+                hold_seg = raw_text[prev_end +
+                                    1: int(segment['discourse_start'])]
+            else:
+                hold_seg = raw_text[prev_end: int(segment['discourse_start'])]
             hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
             temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
             temp_ids = []
@@ -48,22 +60,26 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
                 hold_subword_mask = tokenized_hold.word_ids(0)
                 # Remove [CLS] or [SEP] token if segment start is not start of new sentence
                 # or segment end not end of sentence
-                if not re_bos.search(hold_seg):
+                # If previous segment ends with EOS, assign bos to current segment
+                if not re_bos.search(sent) and not prev_eos:
                     hold_seg_ids = hold_seg_ids[1:]
                     hold_subword_mask = hold_subword_mask[1:]
-                if not re_eos.search(hold_seg):
+                if not re_eos.search(sent):
                     hold_seg_ids = hold_seg_ids[:-1]
                     hold_subword_mask = hold_subword_mask[:-1]
+                    prev_eos = False
+                else:
+                    prev_eos = True
                 temp_label.extend([8]*len(hold_seg_ids))
                 temp_ids.extend(hold_seg_ids)
                 temp_subword.extend(hold_subword_mask)
-                
+
             if len(temp_ids) != 0 and len(temp_subword) != 0 and len(temp_label) != 0:
                 new_segements.append(temp_ids)
                 subword_mask.append(temp_subword)
                 seg_labels.append(temp_label)
 
-        seg = raw_text[int(segment['discourse_start']) : int(segment['discourse_end'])]
+        seg = raw_text[int(segment['discourse_start']): int(segment['discourse_end'])]
         # Insert special token for New Paragraph (strong indicator for boundary)
         seg = re.sub('\n+', ' [NP] ', seg)
 
@@ -77,18 +93,22 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
             seg_subword_mask = tokenized_sent.word_ids(0)
             # Remove [CLS] or [SEP] token if segment start is not start of new sentence
             # or segment end not end of sentence
-            if not re_bos.search(seg):
+            if not re_bos.search(sent) and not prev_eos:
                 seg_ids = seg_ids[1:]
                 seg_subword_mask = seg_subword_mask[1:]
-            if not re_eos.search(seg):
+            if not re_eos.search(sent):
                 seg_ids = seg_ids[:-1]
                 seg_subword_mask = seg_subword_mask[:-1]
-            current_seg_label = [LABEL_2_ID[segment['discourse_type']]]*len(seg_ids)
+                prev_eos = False
+            else:
+                prev_eos = True
+            current_seg_label = [
+                LABEL_2_ID[segment['discourse_type']]]*len(seg_ids)
             temp_label.extend(current_seg_label)
             temp_ids.extend(seg_ids)
             temp_subword.extend(seg_subword_mask)
         if len(temp_ids) != 0 and len(temp_subword) != 0 and len(temp_label) != 0:
-            seg_labels.append(temp_label) 
+            seg_labels.append(temp_label)
             new_segements.append(temp_ids)
             subword_mask.append(temp_subword)
         prev_end = int(segment['discourse_end'])
@@ -109,12 +129,15 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
             hold_subword_mask = tokenized_hold.word_ids(0)
             # Remove [CLS] or [SEP] token if segment start is not start of new sentence
             # or segment end not end of sentence
-            if not re_bos.search(hold_seg):
+            if not re_bos.search(sent) and not prev_eos:
                 hold_seg_ids = hold_seg_ids[1:]
                 hold_subword_mask = hold_subword_mask[1:]
-            if not re_eos.search(hold_seg):
+            if not re_eos.search(sent):
                 hold_seg_ids = hold_seg_ids[:-1]
                 hold_subword_mask = hold_subword_mask[:-1]
+                prev_eos = False
+            else:
+                prev_eos = True
             temp_label.extend([8]*len(hold_seg_ids))
             temp_ids.extend(hold_seg_ids)
             temp_subword.extend(hold_subword_mask)
@@ -122,7 +145,7 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
             new_segements.append(temp_ids)
             subword_mask.append(temp_subword)
             seg_labels.append(temp_label)
-        
+
     return new_segements, seg_labels, subword_mask
 
 
@@ -142,9 +165,31 @@ def preprocessing_test(raw_text: str, tokenizer) -> "tuple[list]":
     return ids, subword_mask
 
 
+class SlidingWindowFeature():
+    def __init__(self, doc_id, input_ids, labels, subword_masks, cls_pos, sliding_window, tokenizer=None) -> None:
+        self.doc_id = doc_id
+        self.tokenizer = tokenizer
+        self.cls_pos = cls_pos
+        self.sliding_window = sliding_window
+        if sliding_window is not None:
+            self.input_ids = [input_ids[start:end]
+                              for start, end in sliding_window]
+            self.subword_masks = [subword_masks[start:end]
+                                  for start, end in sliding_window]
+            self.labels = [labels[start:end] for start, end in sliding_window]
+            self.num_windows = len(sliding_window)
+        else:
+            self.input_ids = [input_ids]
+            self.subword_masks = [subword_masks]
+            self.labels = [labels]
+            self.sliding_window = [[0, len(input_ids)]]
+            self.num_windows = 1
+
+
 class DocFeature():
     def __init__(self, doc_id: str, raw_text: str, train_or_test: str, seg_labels=None, tokenizer=None) -> None:
         self.doc_id = doc_id
+        self.tokenizer = tokenizer
         if train_or_test == 'train':
             self.input_ids, self.seg_labels, self.subword_masks = preprocessing_train(
                 labels=seg_labels, raw_text=raw_text, tokenizer=tokenizer)
@@ -157,15 +202,21 @@ class DocFeature():
             self.subword_masks = list(
                 itertools.chain.from_iterable(self.subword_masks))
             self.subword_masks = [
-                0 if e is None else 1 for e in self.subword_masks]
+                -1 if e is None else e for e in self.subword_masks]
+            self.boundary_pos = self.get_boundary_pos()
+            self.cls_pos = [index for index, element in enumerate(
+                self.input_ids) if element == tokenizer.cls_token_id]
+            self.count = self.get_sent_level_label()
+            self.sliding_window = self.create_sliding_window_train()
         elif train_or_test == 'test':
-            self.input_ids, self.subword_masks = preprocessing_test(raw_text, tokenizer=tokenizer)
+            self.input_ids, self.subword_masks = preprocessing_test(
+                raw_text, tokenizer=tokenizer)
             self.subword_masks = [
-                0 if e is None else 1 for e in self.subword_masks]
+                -1 if e is None else e for e in self.subword_masks]
+            self.cls_pos = [index for index, element in enumerate(
+                self.input_ids) if element == tokenizer.cls_token_id]
         else:
             raise NameError('Should be either train/test')
-        self.cls_pos = [index for index, element in enumerate(self.input_ids) if element == tokenizer.cls_token_id]
-        self.get_sent_level_label()
 
     def convert_label_to_bio(self, label, seq_len):
         if label[0] != 8:
@@ -174,11 +225,96 @@ class DocFeature():
         else:
             temp = [LABEL_BIO['O']]*seq_len
         return temp
-    
+
     def get_sent_level_label(self):
         prev_cls = 0
+        labels = list(itertools.chain.from_iterable(self.seg_labels))
+        count = 0
         for pos in self.cls_pos:
-            print()
+            distinct = set(labels[prev_cls:pos])
+            if (8 in distinct and len(distinct) > 2) or (8 not in distinct and len(distinct) > 1):
+                count += 1
+            prev_cls = pos
+        return count
+
+    def get_boundary_pos(self):
+        boundary = []
+        prev = 0
+        for seg in self.seg_labels:
+            boundary.append(len(seg)+prev)
+            prev = len(seg) + prev
+        return boundary
+
+    def create_sliding_window_train(self):
+        if len(self.input_ids) <= 512:
+            return SlidingWindowFeature(doc_id=self.doc_id, input_ids=self.input_ids, labels=self.labels, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=None)
+        else:
+            # Create intersection of boundary pos list and cls token pos list, as we can only create slice on cls token, not any boundary
+            bound_cls_pos = list(
+                set(self.boundary_pos).intersection(set(self.cls_pos)))
+            bound_cls_pos.append(len(self.input_ids))
+            bound_cls_pos.sort()
+            slice_pos_list = []
+            slice_start = 0
+            slice_end = -1
+            # For the case that last candidate boundary is less than 512: slice there.
+            if max(bound_cls_pos) < 512:
+                slice_pos_list.append([0, bound_cls_pos[-1]])
+                if len(bound_cls_pos) > 1:
+                    slice_pos_list.append([bound_cls_pos[-2]], len(self.input_ids))
+                else:
+                    print()
+            for pos in bound_cls_pos:
+                if (pos - slice_start) > 512:
+                    # When the two adjacent boundary pos having distance larger than 512, or the first boundary is already more than 512
+                    if (slice_end == -1 or slice_end == slice_start) or (bound_cls_pos.index(slice_end) == 0):
+                        prev = 0
+                        for i, idx in enumerate(self.cls_pos[self.cls_pos.index(slice_start):]):
+                            if idx > 512:
+                                slice_end = prev
+                                break
+                            prev = idx
+                        slice_pos_list.append([slice_start, slice_end])
+                        try:
+                            slice_start = self.cls_pos[i-2]
+                        except IndexError:
+                            slice_start = self.cls_pos[i-1]
+                        if slice_end in bound_cls_pos:
+                            if bound_cls_pos.index(slice_end) == 0:
+                                print()
+                    # Normal case, finding the n'th boundary having distance > 512 with slice_start
+                    # Make the n-1'th boundary become slice_end
+                    else:
+                        # When the n-1'th boundary is having distance with current slice start > 512
+                        # Just find the first sentence boundary within it that has distacne < 512
+                        if slice_end-slice_start > 512:
+                            for idx in self.cls_pos[self.cls_pos.index(slice_start):]:
+                                if slice_end-idx < 512:
+                                    slice_start = idx
+                                    break
+                        # If the n-1'th boundary is too short, pick a sentence boundary after it and before the next slice start
+                        # But skip when reaching the end of document, as there would no more boundary after it
+                        if slice_end-slice_start < 150 and pos!=bound_cls_pos[-1]:
+                            next_start = bound_cls_pos[bound_cls_pos.index(slice_end)+1]
+                            candidate_end = self.cls_pos[self.cls_pos.index(slice_end): self.cls_pos.index(next_start)]
+                            slice_end = candidate_end[len(candidate_end)-len(candidate_end) // 3]
+                            slice_pos_list.append([slice_start, slice_end])
+                            slice_start = candidate_end[len(candidate_end) // 3]
+                        else:
+                            se_index = bound_cls_pos.index(slice_end)
+                            slice_pos_list.append([slice_start, slice_end])
+                            slice_start = bound_cls_pos[:se_index][-1]
+                slice_end = pos
+            if slice_pos_list[-1][1] != len(self.input_ids):
+                if slice_start != slice_pos_list[-1][0]:
+                    slice_pos_list.append([slice_start, len(self.input_ids)])
+                else:
+                    for idx in self.cls_pos[self.cls_pos.index(slice_start):]:
+                        if slice_end-idx < 512:
+                            slice_start = idx
+                            break
+                    slice_pos_list.append([slice_start, len(self.input_ids)])
+            return SlidingWindowFeature(doc_id=self.doc_id, input_ids=self.input_ids, labels=self.labels, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=slice_pos_list)
 
 
 def pad_sequences(sequences, maxlen=None, dtype='int32',
@@ -312,3 +448,44 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
                                   dtype="long", truncating="post").tolist()
     subword_masks = torch.LongTensor(subword_masks)
     return TensorDataset(input_ids, labels, attention_masks, subword_masks)
+
+
+def create_tensor_ds_sliding_window(features: "list[DocFeature]") -> TensorDataset:
+    input_ids = []
+    labels = []
+    attention_masks = []
+    subword_masks = []
+    cls_pos = []
+    sliding_window_pos = []
+    for feat in features:
+        for i in range(feat.sliding_window.num_windows):
+            input_ids.append(feat.sliding_window.input_ids[i])
+            labels.append(feat.sliding_window.labels[i])
+            attention_masks.append([1]*len(feat.sliding_window.input_ids[i]))
+            subword_masks.append(feat.sliding_window.subword_masks[i])
+            cls_pos.append(feat.sliding_window.cls_pos)
+            sliding_window_pos.append(feat.sliding_window.sliding_window)
+            if len(feat.sliding_window.input_ids[i]) > 512:
+                print()
+            if feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i][1]:
+                print()
+            if i > 0 and feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i-1][1]:
+                print()
+    input_ids = pad_sequences(input_ids,
+                              maxlen=MAX_LEN, value=0, padding="post",
+                              dtype="long", truncating="post").tolist()
+    input_ids = torch.LongTensor(input_ids)
+    labels = pad_sequences(labels,
+                           maxlen=MAX_LEN, value=0, padding="post",
+                           dtype="long", truncating="post").tolist()
+    labels = torch.LongTensor(labels)
+    attention_masks = pad_sequences(attention_masks,
+                                    maxlen=MAX_LEN, value=0, padding="post",
+                                    dtype="long", truncating="post").tolist()
+    attention_masks = torch.LongTensor(attention_masks)
+    subword_masks = pad_sequences(subword_masks,
+                                  maxlen=MAX_LEN, value=0, padding="post",
+                                  dtype="long", truncating="post").tolist()
+    subword_masks = torch.LongTensor(subword_masks)
+    sliding_window_pos = torch.LongTensor(sliding_window_pos)
+    return Dataset(input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos)
