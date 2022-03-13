@@ -293,8 +293,15 @@ class DocFeature():
                         # But skip when reaching the end of document, as there would no more boundary after it
                         if slice_end-slice_start < 150 and pos!=bound_cls_pos[-1]:
                             next_start = bound_cls_pos[bound_cls_pos.index(slice_end)+1]
-                            candidate_end = self.cls_pos[self.cls_pos.index(slice_end): self.cls_pos.index(next_start)]
-                            slice_end = candidate_end[len(candidate_end)-len(candidate_end) // 3]
+                            if next_start - slice_start <= MAX_LEN:
+                                candidate_end = self.cls_pos[self.cls_pos.index(slice_end): self.cls_pos.index(next_start)]
+                                slice_end = candidate_end[len(candidate_end)-len(candidate_end) // 3]
+                            else:
+                                candidate_end = self.cls_pos[self.cls_pos.index(slice_end): self.cls_pos.index(next_start)]
+                                for idx in candidate_end:
+                                    if idx-slice_start > MAX_LEN:
+                                        break
+                                    slice_end = idx
                             slice_pos_list.append([slice_start, slice_end])
                             slice_start = candidate_end[len(candidate_end) // 3]
                         else:
@@ -468,6 +475,7 @@ class SlidingWindowDataset(Dataset):
         return self.input_ids[idx], self.labels[idx], self.attention_masks[idx], self.subword_masks[idx], self.cls_pos[idx], self.sliding_window_pos[idx]
 
 def create_tensor_ds_sliding_window(features: "list[DocFeature]") -> TensorDataset:
+    c=0
     input_ids = []
     labels = []
     attention_masks = []
@@ -490,7 +498,7 @@ def create_tensor_ds_sliding_window(features: "list[DocFeature]") -> TensorDatas
             if feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i][1]:
                 print()
             if i > 0 and feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i-1][1]:
-                print()
+                c+=1
     input_ids = pad_sequences(input_ids,
                               maxlen=MAX_LEN, value=0, padding="post",
                               dtype="long", truncating="post").tolist()
