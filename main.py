@@ -59,29 +59,41 @@ train_doc_texts = [all_doc_texts[i] for i in train_index]
 dev_doc_texts = [all_doc_texts[i] for i in dev_index]
 
 
-# Due to design of huggingface's tokenizer, not possible to multithread to speed up the loading
-# Better run once and load for future development
-#train_features = torch.load('train_features.pt')
-#dev_features = torch.load('dev_features.pt')
-#temp_test_features = torch.load('temp_test_features.pt')
-
-t = DocFeature(doc_id='6C3B801F92D2', seg_labels=all_labels.loc[all_labels['id'] == '6C3B801F92D2'],
-                             raw_text=all_doc_texts[all_doc_ids.index('6C3B801F92D2')], train_or_test='train', tokenizer=TOKENIZER)
+t = DocFeature(doc_id='D699ADB66EA5', seg_labels=all_labels.loc[all_labels['id'] == 'D699ADB66EA5'],
+                             raw_text=all_doc_texts[all_doc_ids.index('D699ADB66EA5')], train_or_test='train', tokenizer=TOKENIZER)
 
 #all_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-#                             raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
+#                           raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
+
+"""
 train_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
                              raw_text=train_doc_texts[train_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(train_doc_ids)]
 dev_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-                           raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in dev_doc_ids]
+                           raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(dev_doc_ids)]
 test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.index(
     ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in test_doc_ids]
 
 
 train_ds = create_tensor_ds_sliding_window(train_features)
 dev_ds = create_tensor_ds_sliding_window(dev_features)
+"""
+
+# Due to design of huggingface's tokenizer, not possible to multithread to speed up the loading
+# Better run once and load for future development
+train_ds = torch.load('train_ds.pt')
+dev_ds = torch.load('dev_ds.pt')
+
+
 train_sp = RandomSampler(train_ds)
-train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp)
+def custom_batch_collation(x):
+    num_elements = len(x[0])
+    return_tup = [[] for _ in range(num_elements)]
+    for row in x:
+        for i, e in enumerate(row):
+            return_tup[i].append(e)
+    return return_tup
+
+train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp, collate_fn=custom_batch_collation)
 
 
 config = AutoConfig.from_pretrained("roberta-base")
@@ -92,19 +104,46 @@ model.transformer.resize_token_embeddings(len(TOKENIZER))
 criterion = FocalLoss(ignore_index=0, gamma=2)
 
 bert_param_optimizer = list(model.transformer.named_parameters())
-scope_fc_param_optimizer = list(model.classifier.named_parameters())
+ner_fc_param_optimizer = list(model.plain_ner.named_parameters())
 no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-optimizer_grouped_parameters = [
-    {'params': [p for n, p in bert_param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01,
-        'lr': LEARNING_RATE},
-    {'params': [p for n, p in bert_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
-        'lr': LEARNING_RATE},
-    {'params': [p for n, p in scope_fc_param_optimizer if not any(nd in n for nd in no_decay)],
-        'weight_decay': 0.01,
-        'lr': LEARNING_RATE},
-    {'params': [p for n, p in scope_fc_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
-        'lr': LEARNING_RATE},
-]
+
+if not BASELINE:
+    boundary_param_optimizer = list(model.boundary.named_parameters())
+    type_param_optimizer = list(model.type_predict.named_parameters())
+
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in bert_param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in bert_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in ner_fc_param_optimizer if not any(nd in n for nd in no_decay)],
+            'weight_decay': 0.01,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in ner_fc_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in boundary_param_optimizer if not any(nd in n for nd in no_decay)],
+            'weight_decay': 0.01,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in boundary_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in type_param_optimizer if not any(nd in n for nd in no_decay)],
+            'weight_decay': 0.01,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in type_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            'lr': LEARNING_RATE},
+    ]
+else:
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in bert_param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in bert_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in ner_fc_param_optimizer if not any(nd in n for nd in no_decay)],
+            'weight_decay': 0.01,
+            'lr': LEARNING_RATE},
+        {'params': [p for n, p in ner_fc_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            'lr': LEARNING_RATE},
+    ]
 t_total = int(len(train_dl) / 1 * NUM_EPOCH)
 optimizer = AdamW(params=optimizer_grouped_parameters, lr=LEARNING_RATE)
 
@@ -143,7 +182,11 @@ for i in range(NUM_EPOCH):
     train_loss = AverageMeter()
     for step, batch in enumerate(train_dl):
         optimizer.zero_grad()
-        input_ids, labels, attention_masks, subword_masks = tuple(t.cuda() for t in batch)
+        input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+        input_ids = torch.stack(input_ids).cuda()
+        labels = torch.stack(labels).cuda()
+        attention_masks = torch.stack(attention_masks).cuda()
+        subword_masks = torch.stack(subword_masks).cuda()
         active_padding_mask = attention_masks.view(-1) == 1
         with autocast():
             logits = model(input_ids=input_ids, attention_mask=attention_masks)
@@ -162,7 +205,11 @@ for i in range(NUM_EPOCH):
     valid_loss = AverageMeter()
     pbar = tqdm(total=len(dev_ds), desc='Eval')
     for batch in dev_ds:
-        input_ids, labels, attention_masks, subword_masks = tuple(t.cuda() for t in batch)
+        input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+        input_ids = torch.stack(input_ids).cuda()
+        labels = torch.stack(labels).cuda()
+        attention_masks = torch.stack(attention_masks).cuda()
+        subword_masks = torch.stack(subword_masks).cuda()
         input_ids = input_ids.unsqueeze(0)
         attention_masks = attention_masks.unsqueeze(0)
         active_padding_mask = attention_masks.view(-1) == 1

@@ -1,3 +1,5 @@
+from unicodedata import bidirectional
+import transformers
 from params import *
 import torch.nn as nn
 import torch
@@ -9,10 +11,17 @@ class TModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.transformer = AutoModel.from_pretrained(
-            pretrained_model_name_or_path="allenai/longformer-base-4096", cache_dir=MODEL_CACHE_DIR, config=config)
+            pretrained_model_name_or_path="roberta-base", cache_dir=MODEL_CACHE_DIR, config=config)
         self.dropout = nn.Dropout()
-        self.classifier = nn.Sequential(
-            self.dropout, nn.Linear(config.hidden_size, NUM_LABELS))
+        self.relu = nn.ReLU(True)
+        self.plain_ner = nn.Linear(config.hidden_size, len(LABEL_BIO))
+        if not BASELINE:
+            self.boundary = nn.Sequential(
+                nn.LSTM(bidirectional=False, input_size=config.hidden_size, hidden_size=LSTM_HIDDEN, batch_first=True), self.relu, nn.Linear(LSTM_HIDDEN, 2)
+            )
+            self.type_predict = nn.Sequential(
+                nn.LSTM(bidirectional=True, input_size=config.hidden_size, hidden_size=LSTM_HIDDEN, batch_first=True), self.relu, nn.Linear(LSTM_HIDDEN, len(LABEL_2_ID))
+            )
     
     def forward(self,
                 input_ids=None,
@@ -38,8 +47,13 @@ class TModel(nn.Module):
         )
         sequence_output = outputs[0]
         sequence_output = self.dropout(sequence_output)
-        sequence_output = self.classifier(sequence_output)
-        return sequence_output
+        ner_result = self.plain_ner(sequence_output)
+        if BASELINE:
+            return ner_result
+        else:
+            boundary_result = self.boundary(sequence_output)
+            type_result = self.type_predict(sequence_output)
+            return ner_result, boundary_result, type_result
 
 class FocalLoss(torch.nn.Module):
     """ Focal Loss, as described in https://arxiv.org/abs/1708.02002.
