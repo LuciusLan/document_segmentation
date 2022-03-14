@@ -19,7 +19,7 @@ import os
 import gc
 import math
 
-TOKENIZER = AutoTokenizer.from_pretrained("roberta-base")
+TOKENIZER = AutoTokenizer.from_pretrained("roberta-base", cache_dir=MODEL_CACHE_DIR)
 # Add special token for new paragraph
 TOKENIZER.add_special_tokens({'additional_special_tokens': ['[NP]']})
 
@@ -85,6 +85,7 @@ dev_ds = torch.load('dev_ds.pt')
 
 
 train_sp = RandomSampler(train_ds)
+dev_sp = RandomSampler(dev_ds)
 def custom_batch_collation(x):
     num_elements = len(x[0])
     return_tup = [[] for _ in range(num_elements)]
@@ -94,6 +95,7 @@ def custom_batch_collation(x):
     return return_tup
 
 train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp, collate_fn=custom_batch_collation)
+dev_dl = DataLoader(dev_ds, batch_size=BATCH_SIZE, sampler=dev_sp, collate_fn=custom_batch_collation)
 
 
 config = AutoConfig.from_pretrained("roberta-base")
@@ -203,15 +205,13 @@ for i in range(NUM_EPOCH):
 
     model.eval()
     valid_loss = AverageMeter()
-    pbar = tqdm(total=len(dev_ds), desc='Eval')
-    for batch in dev_ds:
+    pbar = tqdm(total=len(dev_dl), desc='Eval')
+    for batch in dev_dl:
         input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
         input_ids = torch.stack(input_ids).cuda()
         labels = torch.stack(labels).cuda()
         attention_masks = torch.stack(attention_masks).cuda()
         subword_masks = torch.stack(subword_masks).cuda()
-        input_ids = input_ids.unsqueeze(0)
-        attention_masks = attention_masks.unsqueeze(0)
         active_padding_mask = attention_masks.view(-1) == 1
         logits = model(input_ids=input_ids, attention_mask=attention_masks)
         loss = criterion(
@@ -221,3 +221,5 @@ for i in range(NUM_EPOCH):
         valid_loss.update(val=loss.item(), n=1)
         pbar.update()
         pbar.set_postfix({'loss': valid_loss.avg})
+
+print()
