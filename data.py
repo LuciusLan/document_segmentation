@@ -76,7 +76,7 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
                 subword_mask.append(temp_subword)
                 seg_labels.append(temp_label)
 
-        seg = raw_text[int(segment['discourse_start']): int(segment['discourse_end'])]
+        seg = raw_text[int(segment['discourse_start'])                       : int(segment['discourse_end'])]
         # Insert special token for New Paragraph (strong indicator for boundary)
         seg = re.sub('\n+', ' [NP] ', seg)
 
@@ -163,7 +163,7 @@ def preprocessing_test(raw_text: str, tokenizer) -> "tuple[list]":
 
 
 class SlidingWindowFeature():
-    def __init__(self, doc_id, input_ids, labels, subword_masks, cls_pos, sliding_window, tokenizer=None) -> None:
+    def __init__(self, doc_id, input_ids, labels_type, labels_bio, labels_boundary, subword_masks, cls_pos, sliding_window, tokenizer=None) -> None:
         self.doc_id = doc_id
         self.tokenizer = tokenizer
         self.cls_pos = cls_pos
@@ -173,12 +173,38 @@ class SlidingWindowFeature():
                               for start, end in sliding_window]
             self.subword_masks = [subword_masks[start:end]
                                   for start, end in sliding_window]
-            self.labels = [labels[start:end] for start, end in sliding_window]
+            self.labels_type = [labels_type[start:end]
+                                for start, end in sliding_window]
+            self.labels_bio = [labels_bio[start:end]
+                               for start, end in sliding_window]
+            self.labels_boundary = [labels_boundary[start:end]
+                                    for start, end in sliding_window]
             self.num_windows = len(sliding_window)
         else:
             self.input_ids = [input_ids]
             self.subword_masks = [subword_masks]
-            self.labels = [labels]
+            self.labels_type = [labels_type]
+            self.labels_bio = [labels_bio]
+            self.labels_boundary = [labels_boundary]
+            self.sliding_window = [[0, len(input_ids)]]
+            self.num_windows = 1
+
+
+class SlidingWindowFeatureTest():
+    def __init__(self, doc_id, input_ids, subword_masks, cls_pos, sliding_window, tokenizer=None) -> None:
+        self.doc_id = doc_id
+        self.tokenizer = tokenizer
+        self.cls_pos = cls_pos
+        self.sliding_window = sliding_window
+        if sliding_window is not None:
+            self.input_ids = [input_ids[start:end]
+                              for start, end in sliding_window]
+            self.subword_masks = [subword_masks[start:end]
+                                  for start, end in sliding_window]
+            self.num_windows = len(sliding_window)
+        else:
+            self.input_ids = [input_ids]
+            self.subword_masks = [subword_masks]
             self.sliding_window = [[0, len(input_ids)]]
             self.num_windows = 1
 
@@ -191,9 +217,11 @@ class DocFeature():
             self.input_ids, self.seg_labels, self.subword_masks = preprocessing_train(
                 labels=seg_labels, raw_text=raw_text, tokenizer=tokenizer)
             #self.labels = [[label]*len(seg) for seg, label in zip(self.input_ids, label_ids)]
-            self.labels = [self.convert_label_to_bio(label, len(
+            self.labels_bio = [self.convert_label_to_bio(label, len(
                 seg)) for seg, label in zip(self.input_ids, self.seg_labels)]
-            self.labels = list(itertools.chain.from_iterable(self.labels))
+            self.labels_bio = list(
+                itertools.chain.from_iterable(self.labels_bio))
+            self.labels = list(itertools.chain.from_iterable(self.seg_labels))
             self.input_ids = list(
                 itertools.chain.from_iterable(self.input_ids))
             self.subword_masks = list(
@@ -204,6 +232,7 @@ class DocFeature():
             self.cls_pos = [index for index, element in enumerate(
                 self.input_ids) if element == tokenizer.cls_token_id]
             self.count = self.get_sent_level_label()
+            self.boundary_label = self.convert_label_to_bound()
             self.sliding_window = self.create_sliding_window_train()
         elif train_or_test == 'test':
             self.input_ids, self.subword_masks = preprocessing_test(
@@ -212,6 +241,7 @@ class DocFeature():
                 -1 if e is None else e for e in self.subword_masks]
             self.cls_pos = [index for index, element in enumerate(
                 self.input_ids) if element == tokenizer.cls_token_id]
+            self.sliding_window = self.create_sliding_window_test()
         else:
             raise NameError('Should be either train/test')
 
@@ -222,6 +252,21 @@ class DocFeature():
         else:
             temp = [LABEL_BIO['O']]*seq_len
         return temp
+
+    def convert_label_to_bound(self):
+        bound = []
+        for i, e in enumerate(self.labels_bio):
+            if e in [1, 3, 5, 7, 9, 11, 13]:
+                bound.append(1)
+                if i == 0:
+                    pass
+                else:
+                    bound[-2] = 2
+            elif e == 0:
+                bound.append(0)
+            else:
+                bound.append(3)
+        return bound
 
     def get_sent_level_label(self):
         prev_cls = 0
@@ -244,7 +289,8 @@ class DocFeature():
 
     def create_sliding_window_train(self):
         if len(self.input_ids) <= MAX_LEN:
-            return SlidingWindowFeature(doc_id=self.doc_id, input_ids=self.input_ids, labels=self.labels, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=None)
+            return SlidingWindowFeature(doc_id=self.doc_id, input_ids=self.input_ids, labels_type=self.labels, labels_bio=self.labels_bio,
+                                        labels_boundary=self.boundary_label, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=None)
         else:
             # Create intersection of boundary pos list and cls token pos list, as we can only create slice on cls token, not any boundary
             bound_cls_pos = list(
@@ -258,7 +304,8 @@ class DocFeature():
             if max(bound_cls_pos) < MAX_LEN:
                 slice_pos_list.append([0, bound_cls_pos[-1]])
                 if len(bound_cls_pos) > 1:
-                    slice_pos_list.append([bound_cls_pos[-2]], len(self.input_ids))
+                    slice_pos_list.append(
+                        [bound_cls_pos[-2]], len(self.input_ids))
                 else:
                     print()
             for pos in bound_cls_pos:
@@ -291,19 +338,24 @@ class DocFeature():
                             slice_start = idx
                         # If the n-1'th boundary is too short, pick a sentence boundary after it and before the next slice start
                         # But skip when reaching the end of document, as there would no more boundary after it
-                        if slice_end-slice_start < 150 and pos!=bound_cls_pos[-1]:
-                            next_start = bound_cls_pos[bound_cls_pos.index(slice_end)+1]
+                        if slice_end-slice_start < 150 and pos != bound_cls_pos[-1]:
+                            next_start = bound_cls_pos[bound_cls_pos.index(
+                                slice_end)+1]
                             if next_start - slice_start <= MAX_LEN:
-                                candidate_end = self.cls_pos[self.cls_pos.index(slice_end): self.cls_pos.index(next_start)]
-                                slice_end = candidate_end[len(candidate_end)-len(candidate_end) // 3]
+                                candidate_end = self.cls_pos[self.cls_pos.index(
+                                    slice_end): self.cls_pos.index(next_start)]
+                                slice_end = candidate_end[len(
+                                    candidate_end)-len(candidate_end) // 3]
                             else:
-                                candidate_end = self.cls_pos[self.cls_pos.index(slice_end): self.cls_pos.index(next_start)]
+                                candidate_end = self.cls_pos[self.cls_pos.index(
+                                    slice_end): self.cls_pos.index(next_start)]
                                 for idx in candidate_end:
                                     if idx-slice_start > MAX_LEN:
                                         break
                                     slice_end = idx
                             slice_pos_list.append([slice_start, slice_end])
-                            slice_start = candidate_end[len(candidate_end) // 3]
+                            slice_start = candidate_end[len(
+                                candidate_end) // 3]
                         else:
                             se_index = bound_cls_pos.index(slice_end)
                             slice_pos_list.append([slice_start, slice_end])
@@ -323,7 +375,57 @@ class DocFeature():
                             break
                     slice_start = idx
                     slice_pos_list.append([slice_start, len(self.input_ids)])
-            return SlidingWindowFeature(doc_id=self.doc_id, input_ids=self.input_ids, labels=self.labels, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=slice_pos_list)
+            return SlidingWindowFeature(doc_id=self.doc_id, input_ids=self.input_ids, labels_type=self.labels, labels_bio=self.labels_bio,
+                                        labels_boundary=self.boundary_label, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=slice_pos_list)
+
+    def create_sliding_window_test(self):
+        if len(self.input_ids) <= MAX_LEN:
+            return SlidingWindowFeatureTest(doc_id=self.doc_id, input_ids=self.input_ids, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=None)
+        else:
+            slice_pos_list = []
+            slice_start = 0
+            slice_end = -1
+            if len(self.cls_pos) == 1:
+                return SlidingWindowFeatureTest(doc_id=self.doc_id, input_ids=self.input_ids, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=[[0, MAX_LEN]])
+            if max(self.cls_pos) <= MAX_LEN:
+                slice_pos_list.append([0, self.cls_pos[-1]])
+                try:
+                    slice_pos_list.append(
+                        [self.cls_pos[-4], len(self.input_ids)])
+                except IndexError:
+                    slice_pos_list.append(
+                        [self.cls_pos[-2], len(self.input_ids)])
+            else:
+                for i, pos in enumerate(self.cls_pos):
+                    if (pos-slice_start) > MAX_LEN:
+                        slice_pos_list.append([slice_start, slice_end])
+                        se_index = self.cls_pos.index(slice_end)
+                        ss_index = self.cls_pos.index(slice_start)
+                        temp = self.cls_pos[ss_index:se_index]
+                        if len(temp) > 2:
+                            slice_start = temp[len(temp) - (len(temp)//3)]
+                        else:
+                            slice_start = temp[-1]
+                    slice_end = pos
+                    if i == len(self.cls_pos)-1:
+                        slice_pos_list.append([slice_start, slice_end])
+                        se_index = self.cls_pos.index(slice_end)
+                        ss_index = self.cls_pos.index(slice_start)
+                        temp = self.cls_pos[ss_index:se_index]
+                        if len(temp) > 2:
+                            slice_start = temp[len(temp) - (len(temp)//3)]
+                        else:
+                            slice_start = temp[-1]
+                if slice_pos_list[-1][1] != len(self.input_ids):
+                    if slice_start != slice_pos_list[-1][0]:
+                        if len(self.input_ids) - slice_start:
+                            for idx in self.cls_pos[self.cls_pos.index(slice_start):]:
+                                if slice_end-idx <= MAX_LEN:
+                                    break
+                            slice_start = idx
+                        slice_pos_list.append(
+                            [slice_start, len(self.input_ids)])
+            return SlidingWindowFeatureTest(doc_id=self.doc_id, input_ids=self.input_ids, subword_masks=self.subword_masks, cls_pos=self.cls_pos, sliding_window=slice_pos_list)
 
 
 def pad_sequences(sequences, maxlen=None, dtype='int32',
@@ -458,26 +560,48 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
     subword_masks = torch.LongTensor(subword_masks)
     return TensorDataset(input_ids, labels, attention_masks, subword_masks)
 
+
 class SlidingWindowDataset(Dataset):
-    def __init__(self, input_ids:torch.Tensor, labels: torch.Tensor, attention_masks: torch.Tensor, subword_masks: torch.Tensor,
-                 cls_pos: list, sliding_window_pos: "list[list]") -> None:
+    def __init__(self, input_ids: torch.Tensor,  labels_type: torch.Tensor, labels_bio: torch.Tensor, labels_boundary: torch.Tensor, attention_masks: torch.Tensor,
+                 subword_masks: torch.Tensor, cls_pos: list, sliding_window_pos: "list[list]") -> None:
         self.input_ids = input_ids
-        self.labels = labels
+        self.labels_type = labels_type
+        self.labels_bio = labels_bio
+        self.labels_boundary = labels_boundary
         self.attention_masks = attention_masks
         self.subword_masks = subword_masks
         self.cls_pos = cls_pos
         self.sliding_window_pos = sliding_window_pos
-    
+
     def __len__(self):
         return len(self.input_ids)
 
     def __getitem__(self, idx):
-        return self.input_ids[idx], self.labels[idx], self.attention_masks[idx], self.subword_masks[idx], self.cls_pos[idx], self.sliding_window_pos[idx]
+        return self.input_ids[idx], self.labels_type[idx], self.labels_bio[idx], self.labels_boundary[idx], self.attention_masks[idx], self.subword_masks[idx], self.cls_pos[idx], self.sliding_window_pos[idx]
+
+
+class SlidingWindowDatasetTest(Dataset):
+    def __init__(self, input_ids: torch.Tensor, attention_masks: torch.Tensor, subword_masks: torch.Tensor,
+                 cls_pos: list, sliding_window_pos: "list[list]") -> None:
+        self.input_ids = input_ids
+        self.attention_masks = attention_masks
+        self.subword_masks = subword_masks
+        self.cls_pos = cls_pos
+        self.sliding_window_pos = sliding_window_pos
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, idx):
+        return self.input_ids[idx], self.attention_masks[idx], self.subword_masks[idx], self.cls_pos[idx], self.sliding_window_pos[idx]
+
 
 def create_tensor_ds_sliding_window(features: "list[DocFeature]") -> TensorDataset:
-    c=0
+    c = 0
     input_ids = []
-    labels = []
+    labels_bio = []
+    labels_type = []
+    labels_boundary = []
     attention_masks = []
     subword_masks = []
     cls_pos = []
@@ -488,25 +612,36 @@ def create_tensor_ds_sliding_window(features: "list[DocFeature]") -> TensorDatas
             if len(feat.cls_pos) == 1:
                 continue
             input_ids.append(feat.sliding_window.input_ids[i])
-            labels.append(feat.sliding_window.labels[i])
+            labels_bio.append(feat.sliding_window.labels_bio[i])
+            labels_boundary.append(feat.sliding_window.labels_boundary[i])
+            labels_type.append(feat.sliding_window.labels_type[i])
             attention_masks.append([1]*len(feat.sliding_window.input_ids[i]))
             subword_masks.append(feat.sliding_window.subword_masks[i])
             cls_pos.append(feat.sliding_window.cls_pos)
-            sliding_window_pos.append([feat.sliding_window.sliding_window, feat.doc_id])
+            sliding_window_pos.append(
+                [feat.sliding_window.sliding_window, feat.doc_id])
             if len(feat.sliding_window.input_ids[i]) > MAX_LEN:
-                print()
+                c += 1
             if feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i][1]:
                 print()
             if i > 0 and feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i-1][1]:
-                c+=1
+                c += 1
     input_ids = pad_sequences(input_ids,
                               maxlen=MAX_LEN, value=0, padding="post",
                               dtype="long", truncating="post").tolist()
     input_ids = torch.LongTensor(input_ids)
-    labels = pad_sequences(labels,
-                           maxlen=MAX_LEN, value=0, padding="post",
-                           dtype="long", truncating="post").tolist()
-    labels = torch.LongTensor(labels)
+    labels_type = pad_sequences(labels_type,
+                                maxlen=MAX_LEN, value=0, padding="post",
+                                dtype="long", truncating="post").tolist()
+    labels_type = torch.LongTensor(labels_type)
+    labels_bio = pad_sequences(labels_bio,
+                               maxlen=MAX_LEN, value=0, padding="post",
+                               dtype="long", truncating="post").tolist()
+    labels_bio = torch.LongTensor(labels_bio)
+    labels_boundary = pad_sequences(labels_boundary,
+                                    maxlen=MAX_LEN, value=0, padding="post",
+                                    dtype="long", truncating="post").tolist()
+    labels_boundary = torch.LongTensor(labels_boundary)
     attention_masks = pad_sequences(attention_masks,
                                     maxlen=MAX_LEN, value=0, padding="post",
                                     dtype="long", truncating="post").tolist()
@@ -515,4 +650,43 @@ def create_tensor_ds_sliding_window(features: "list[DocFeature]") -> TensorDatas
                                   maxlen=MAX_LEN, value=0, padding="post",
                                   dtype="long", truncating="post").tolist()
     subword_masks = torch.LongTensor(subword_masks)
-    return SlidingWindowDataset(input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos)
+    return SlidingWindowDataset(input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos)
+
+
+def create_tensor_ds_sliding_window_test(features: "list[DocFeature]") -> TensorDataset:
+    c = 0
+    input_ids = []
+    attention_masks = []
+    subword_masks = []
+    cls_pos = []
+    sliding_window_pos = []
+    for feat in features:
+        for i in range(feat.sliding_window.num_windows):
+            # If the document contains no puncutation at all... No way but just delete it
+            if len(feat.cls_pos) == 1:
+                continue
+            input_ids.append(feat.sliding_window.input_ids[i])
+            attention_masks.append([1]*len(feat.sliding_window.input_ids[i]))
+            subword_masks.append(feat.sliding_window.subword_masks[i])
+            cls_pos.append(feat.sliding_window.cls_pos)
+            sliding_window_pos.append(
+                [feat.sliding_window.sliding_window, feat.doc_id])
+            if len(feat.sliding_window.input_ids[i]) > MAX_LEN:
+                c += 1
+            if feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i][1]:
+                print()
+            if i > 0 and feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i-1][1]:
+                c += 1
+    input_ids = pad_sequences(input_ids,
+                              maxlen=MAX_LEN, value=0, padding="post",
+                              dtype="long", truncating="post").tolist()
+    input_ids = torch.LongTensor(input_ids)
+    attention_masks = pad_sequences(attention_masks,
+                                    maxlen=MAX_LEN, value=0, padding="post",
+                                    dtype="long", truncating="post").tolist()
+    attention_masks = torch.LongTensor(attention_masks)
+    subword_masks = pad_sequences(subword_masks,
+                                  maxlen=MAX_LEN, value=0, padding="post",
+                                  dtype="long", truncating="post").tolist()
+    subword_masks = torch.LongTensor(subword_masks)
+    return SlidingWindowDatasetTest(input_ids, attention_masks, subword_masks, cls_pos, sliding_window_pos)
