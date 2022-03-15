@@ -1,5 +1,5 @@
 from params import *
-from data import DocFeature, create_tensor_ds, create_tensor_ds_sliding_window
+from data import DocFeature, create_tensor_ds_sliding_window, create_tensor_ds_sliding_window_test
 from model import TModel, FocalLoss
 
 import numpy as np
@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, RandomSampler
 from torch.profiler import profile
 from torch.cuda.amp import autocast
 from tqdm import tqdm
+from sklearn.metrics import classification_report
 
 import itertools
 import random
@@ -59,11 +60,12 @@ train_doc_texts = [all_doc_texts[i] for i in train_index]
 dev_doc_texts = [all_doc_texts[i] for i in dev_index]
 
 
-t = DocFeature(doc_id='D699ADB66EA5', seg_labels=all_labels.loc[all_labels['id'] == 'D699ADB66EA5'],
-                             raw_text=all_doc_texts[all_doc_ids.index('D699ADB66EA5')], train_or_test='train', tokenizer=TOKENIZER)
+#t = DocFeature(doc_id='00C819ADE423', seg_labels=all_labels.loc[all_labels['id'] == '00C819ADE423'],
+#                             raw_text=all_doc_texts[all_doc_ids.index('00C819ADE423')], train_or_test='test', tokenizer=TOKENIZER)
 
 #all_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-#                           raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
+#                           raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
+
 
 """
 train_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
@@ -76,7 +78,9 @@ test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.ind
 
 train_ds = create_tensor_ds_sliding_window(train_features)
 dev_ds = create_tensor_ds_sliding_window(dev_features)
+test_ds = create_tensor_ds_sliding_window_test(dev_features)
 """
+
 
 # Due to design of huggingface's tokenizer, not possible to multithread to speed up the loading
 # Better run once and load for future development
@@ -95,15 +99,20 @@ def custom_batch_collation(x):
     return return_tup
 
 train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp, collate_fn=custom_batch_collation)
-dev_dl = DataLoader(dev_ds, batch_size=BATCH_SIZE, sampler=dev_sp, collate_fn=custom_batch_collation)
+dev_dl = DataLoader(dev_ds, batch_size=2, sampler=dev_sp, collate_fn=custom_batch_collation)
 
 
 config = AutoConfig.from_pretrained("roberta-base")
 config.num_labels = NUM_LABELS
 model = TModel(config=config)
+#model = torch.load('model.pt')
 model = model.to('cuda')
 model.transformer.resize_token_embeddings(len(TOKENIZER))
-criterion = FocalLoss(ignore_index=0, gamma=2)
+
+bio_cls_weights = torch.Tensor([0, 100, 10, 100, 10, 100, 10, 100, 10, 100, 10, 100, 10, 100, 10, 5]).cuda()
+bio_loss = FocalLoss(ignore_index=0, gamma=2, alpha=bio_cls_weights)
+boundary_loss = FocalLoss(ignore_index=0, gamma=2, alpha=torch.Tensor([0,10,10,1]).cuda())
+type_loss = FocalLoss(ignore_index=0, gamma=2)
 
 bert_param_optimizer = list(model.transformer.named_parameters())
 ner_fc_param_optimizer = list(model.plain_ner.named_parameters())
@@ -184,19 +193,26 @@ for i in range(NUM_EPOCH):
     train_loss = AverageMeter()
     for step, batch in enumerate(train_dl):
         optimizer.zero_grad()
-        input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
         input_ids = torch.stack(input_ids).cuda()
-        labels = torch.stack(labels).cuda()
+        labels_type = torch.stack(labels_type).cuda()
+        labels_bio = torch.stack(labels_bio).cuda()
+        labels_boundary = torch.stack(labels_boundary).cuda()
         attention_masks = torch.stack(attention_masks).cuda()
         subword_masks = torch.stack(subword_masks).cuda()
         active_padding_mask = attention_masks.view(-1) == 1
         with autocast():
-            logits = model(input_ids=input_ids, attention_mask=attention_masks)
-            loss = criterion(
-                logits.view(-1, NUM_LABELS)[active_padding_mask], labels.view(-1)[active_padding_mask])
+            with torch.autograd.profiler.profile(use_cuda=True) as prof:
+                ner_logits, boundary_logits, type_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                ner_loss_ = bio_loss(
+                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+                boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
+                type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
+                loss = ner_loss_+boundary_loss_+type_loss_
+            print(prof.key_averages().table())
         loss.backward()
         optimizer.step()
-        #torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         gc.collect()
         train_loss.update(loss.item(), n=input_ids.size(0))
         pbar.update()
@@ -206,20 +222,36 @@ for i in range(NUM_EPOCH):
     model.eval()
     valid_loss = AverageMeter()
     pbar = tqdm(total=len(dev_dl), desc='Eval')
+    preds = []
+    targets = []
     for batch in dev_dl:
         input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
         input_ids = torch.stack(input_ids).cuda()
-        labels = torch.stack(labels).cuda()
+        labels_type = torch.stack(labels_type).cuda()
+        labels_bio = torch.stack(labels_bio).cuda()
+        labels_boundary = torch.stack(labels_boundary).cuda()
         attention_masks = torch.stack(attention_masks).cuda()
         subword_masks = torch.stack(subword_masks).cuda()
         active_padding_mask = attention_masks.view(-1) == 1
         logits = model(input_ids=input_ids, attention_mask=attention_masks)
-        loss = criterion(
-            logits.view(-1, NUM_LABELS)[active_padding_mask], labels.view(-1)[active_padding_mask])
+        with torch.no_grad():
+            with autocast():
+                ner_logits, boundary_logits, type_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                ner_loss_ = bio_loss(
+                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+                boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
+                type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
+                loss = ner_loss_+boundary_loss_+type_loss_
+                
+                preds.append(ner_logits.argmax(-1).detach().cpu().tolist())
+                targets.append(ner_logits.detach().cpu().tolist())
         #torch.cuda.empty_cache()
         gc.collect()
         valid_loss.update(val=loss.item(), n=1)
         pbar.update()
         pbar.set_postfix({'loss': valid_loss.avg})
-
+    
+    preds=list(itertools.chain.from_iterable(list(itertools.chain.from_iterable(preds))))
+    targets=list(itertools.chain.from_iterable(list(itertools.chain.from_iterable(targets))))
+    print(classification_report(targets, preds, digits=4))
 print()
