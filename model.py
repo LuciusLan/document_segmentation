@@ -4,8 +4,8 @@ from params import *
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+from torch.autograd import profiler
 from transformers import AutoModel
-from memory_profiler import profile, memory_usage
 from typing import Optional
 
 class TModel(nn.Module):
@@ -19,20 +19,22 @@ class TModel(nn.Module):
         if not BASELINE:
             self.boundary_encoder = nn.LSTM(bidirectional=True, input_size=config.hidden_size, hidden_size=LSTM_HIDDEN, batch_first=True)
             self.boundary_decoder = nn.LSTM(bidirectional=False, input_size=LSTM_HIDDEN*2, hidden_size=LSTM_HIDDEN, batch_first=True)
-            self.boundary_biaffine = BoundaryBiaffine(LSTM_HIDDEN, LSTM_HIDDEN*2, 1)
-            self.boundary_seg = BoundarySeg()
+            self.boundary_biaffine = BoundaryBiaffine(LSTM_HIDDEN, LSTM_HIDDEN*2, len(BOUNDARY_LABEL_UNIDIRECTION))
+            #self.boundary_seg = BoundarySeg()
             self.boundary_final0 = nn.Linear(config.hidden_size, LSTM_HIDDEN*2)
             self.boundary_final1 = nn.Linear(LSTM_HIDDEN*2, LSTM_HIDDEN*2)
             self.boundary_fc = nn.Linear(LSTM_HIDDEN*2, len(BOUNDARY_LABEL))
-            self.seg_final0 = nn.Linear(config.hidden_size, LSTM_HIDDEN*4)
-            self.seg_final1 = nn.Linear(LSTM_HIDDEN*4, LSTM_HIDDEN*4)
+
+            # No *2 since the boundary decoder can only be unidirectioal
+            self.seg_final0 = nn.Linear(config.hidden_size, LSTM_HIDDEN)
+            self.seg_final1 = nn.Linear(LSTM_HIDDEN, LSTM_HIDDEN)
             self.boundary = nn.ModuleList([self.boundary_encoder, self.boundary_decoder, self.boundary_biaffine, self.boundary_final0, self.boundary_final1, self.boundary_fc])
             self.type_lstm = nn.LSTM(bidirectional=True, input_size=config.hidden_size, hidden_size=LSTM_HIDDEN, batch_first=True)
             self.type_final0 = nn.Linear(config.hidden_size, LSTM_HIDDEN*2)
             self.type_final1 = nn.Linear(LSTM_HIDDEN*2, LSTM_HIDDEN*2)
             self.type_fc = nn.Linear(LSTM_HIDDEN*2, len(LABEL_2_ID))
             self.type_predict = nn.ModuleList([self.type_lstm, self.type_final0, self.type_final1, self.type_fc])
-            self.ner_final = nn.Linear(LSTM_HIDDEN*8+config.hidden_size, len(LABEL_BIO))
+            self.ner_final = nn.Linear(LSTM_HIDDEN*5+config.hidden_size, len(LABEL_BIO))
             self.ner = nn.ModuleList([self.seg_final0, self.seg_final1, self.ner_final])
         self.get_trigram = nn.Conv1d(LSTM_HIDDEN*2, LSTM_HIDDEN*2, 3, padding=1, bias=False)
         self.get_trigram.weight = torch.nn.Parameter(torch.ones([LSTM_HIDDEN*2, LSTM_HIDDEN*2, 3]), requires_grad=False)
@@ -70,16 +72,17 @@ class TModel(nn.Module):
             boundary_hidden = self.boundary_encoder(sequence_output)[0]
             seg_result = self.get_trigram(boundary_hidden.transpose(1,2)).transpose(1,2)
             seg_result = self.boundary_decoder(seg_result)[0]
-            seg_result = F.softmax(self.boundary_biaffine(seg_result, boundary_hidden), dim=2)
-            seg_result = self.boundary_seg(seg_result, boundary_hidden)
+            seg_matrix = self.boundary_biaffine(seg_result, boundary_hidden)
+            #seg_result = F.softmax(self.boundary_biaffine(seg_result, boundary_hidden), dim=2)
+            #seg_result = self.boundary_seg(seg_result, boundary_hidden)
             boundary_result = F.logsigmoid(self.boundary_final0(sequence_output)+self.boundary_final1(boundary_hidden)).mul(boundary_hidden)
             type_hidden = self.type_lstm(sequence_output)[0]
             type_result = F.logsigmoid(self.type_final0(sequence_output)+self.type_final1(type_hidden)).mul(type_hidden)
             ner_result = F.logsigmoid(self.seg_final0(sequence_output)+self.seg_final1(seg_result)).mul(seg_result)
             ner_result = self.ner_final(torch.cat([sequence_output, boundary_result, type_result, seg_result], dim=-1))
-            del seg_result, boundary_result, type_result
-            torch.cuda.empty_cache()
-            return ner_result, self.boundary_fc(boundary_hidden), self.type_fc(type_hidden)
+            #del seg_result, boundary_result, type_result
+            #torch.cuda.empty_cache()
+            return ner_result, self.boundary_fc(boundary_hidden), self.type_fc(type_hidden), seg_matrix
 
 
 class BoundarySeg(nn.Module):
@@ -87,15 +90,18 @@ class BoundarySeg(nn.Module):
         super().__init__()
 
     def forward(self, span_adjacency, bound_hidden):
-        temp = []
-        for j in range(MAX_LEN):
-            j_sum = []
-            for i in range(j, MAX_LEN):
-                result = torch.cat([bound_hidden[:, i], bound_hidden[:, j]], 1)
-                result = result * span_adjacency[:, j, i]
-                j_sum.append(result)
-            temp.append(torch.sum(torch.stack(j_sum, dim=0), dim=0))
-        return torch.stack(temp, 1)
+        with profiler.profile(with_stack=True) as p:
+            temp = []
+            for j in range(MAX_LEN):
+                j_sum = []
+                for i in range(j, MAX_LEN):
+                    result = torch.cat([bound_hidden[:, i], bound_hidden[:, j]], 1)
+                    result = result * span_adjacency[:, j, i]
+                    j_sum.append(result)
+                temp.append(torch.sum(torch.stack(j_sum, dim=0), dim=0))
+            final = torch.stack(temp, 1)
+        print(p.key_averages(group_by_stack_n=5).table(sort_by="self_cuda_time_total"))
+        return final
 
 
 class PairwiseBilinear(nn.Module):

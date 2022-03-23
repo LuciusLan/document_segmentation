@@ -24,6 +24,27 @@ TOKENIZER = AutoTokenizer.from_pretrained("roberta-base", cache_dir=MODEL_CACHE_
 # Add special token for new paragraph
 TOKENIZER.add_special_tokens({'additional_special_tokens': ['[NP]']})
 
+def bound_to_matrix(bound: torch.Tensor) -> torch.LongTensor:
+    """
+    To convert the boundary list to a adjacency matrix (like) that represents
+    the segment span.
+    1: start->end
+    2: end->start (or simply become 0 to ignore backward link)
+
+    input:
+        bound: [batch_size, seq_length]
+    """
+    bs = bound.size(0)
+    mat = torch.zeros([bs, MAX_LEN, MAX_LEN], dtype=torch.long)
+    for b, seq in enumerate(bound):
+        for i, e in enumerate(seq):
+            if e == 1:
+                for j in range(i, MAX_LEN):
+                    if seq[j] == 2:
+                        mat[b][i][j] = 1
+                        break
+    return mat
+
 all_doc_ids = []
 all_doc_texts = []
 for f in tqdm(list(os.listdir(TRAIN_PATH))):
@@ -113,6 +134,7 @@ bio_cls_weights = torch.Tensor([0, 100, 10, 100, 10, 100, 10, 100, 10, 100, 10, 
 bio_loss = FocalLoss(ignore_index=0, gamma=2, alpha=bio_cls_weights)
 boundary_loss = FocalLoss(ignore_index=0, gamma=2, alpha=torch.Tensor([0,10,10,1]).cuda())
 type_loss = FocalLoss(ignore_index=0, gamma=2)
+seg_loss = FocalLoss(ignore_index=0, gamma=2)
 
 bert_param_optimizer = list(model.transformer.named_parameters())
 ner_fc_param_optimizer = list(model.plain_ner.named_parameters())
@@ -186,12 +208,16 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+
+
+
 for i in range(NUM_EPOCH):
     torch.cuda.empty_cache()
     model.train()
     pbar = tqdm(total=len(train_dl), desc='Train')
     train_loss = AverageMeter()
     for step, batch in enumerate(train_dl):
+        bs = len(batch[0])
         optimizer.zero_grad()
         input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
         input_ids = torch.stack(input_ids).cuda()
@@ -201,31 +227,45 @@ for i in range(NUM_EPOCH):
         attention_masks = torch.stack(attention_masks).cuda()
         subword_masks = torch.stack(subword_masks).cuda()
         active_padding_mask = attention_masks.view(-1) == 1
+
+        boundary_matrix = bound_to_matrix(labels_boundary).cuda()
+        pad_matrix = []
+        for i in range(bs):
+            tmp = attention_masks[i].clone()
+            tmp = tmp.view(MAX_LEN, 1)
+            tmp_t = tmp.transpose(0, 1)
+            mat = tmp * tmp_t
+            pad_matrix.append(mat)
+        pad_matrix = torch.stack(pad_matrix, 0)
+        matrix_padding_mask = pad_matrix.view(-1) == 1
         with autocast():
-            with torch.autograd.profiler.profile(use_cuda=True) as prof:
-                ner_logits, boundary_logits, type_logits = model(input_ids=input_ids, attention_mask=attention_masks)
-                ner_loss_ = bio_loss(
-                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
-                boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
-                type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
-                loss = ner_loss_+boundary_loss_+type_loss_
-            print(prof.key_averages().table())
-        loss.backward()
-        optimizer.step()
-        torch.cuda.empty_cache()
-        gc.collect()
+            #with torch.autograd.profiler.profile(use_cuda=True) as prof:
+            ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+            ner_loss_ = bio_loss(
+                ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+            boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
+            type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
+            seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
+            loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
+                
+            #print(prof.key_averages().table())
+            loss.backward()
+            optimizer.step()
+        #torch.cuda.empty_cache()
+        #gc.collect()
         train_loss.update(loss.item(), n=input_ids.size(0))
         pbar.update()
         pbar.set_postfix({'loss': train_loss.avg})
     print(train_loss.avg)
-
+    
     model.eval()
     valid_loss = AverageMeter()
     pbar = tqdm(total=len(dev_dl), desc='Eval')
     preds = []
     targets = []
     for batch in dev_dl:
-        input_ids, labels, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+        bs = len(batch[0])
+        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
         input_ids = torch.stack(input_ids).cuda()
         labels_type = torch.stack(labels_type).cuda()
         labels_bio = torch.stack(labels_bio).cuda()
@@ -233,20 +273,32 @@ for i in range(NUM_EPOCH):
         attention_masks = torch.stack(attention_masks).cuda()
         subword_masks = torch.stack(subword_masks).cuda()
         active_padding_mask = attention_masks.view(-1) == 1
-        logits = model(input_ids=input_ids, attention_mask=attention_masks)
+        
+        boundary_matrix = bound_to_matrix(labels_boundary).cuda()
+        pad_matrix = []
+        for i in range(bs):
+            tmp = attention_masks[i].clone()
+            tmp = tmp.view(MAX_LEN, 1)
+            tmp_t = tmp.transpose(0, 1)
+            mat = tmp * tmp_t
+            pad_matrix.append(mat)
+        pad_matrix = torch.stack(pad_matrix, 0)
+        matrix_padding_mask = pad_matrix.view(-1) == 1
+
         with torch.no_grad():
             with autocast():
-                ner_logits, boundary_logits, type_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
                 ner_loss_ = bio_loss(
                     ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
                 boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
                 type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
-                loss = ner_loss_+boundary_loss_+type_loss_
+                seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
+                loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
                 
                 preds.append(ner_logits.argmax(-1).detach().cpu().tolist())
-                targets.append(ner_logits.detach().cpu().tolist())
+                targets.append(labels_bio.detach().cpu().tolist())
         #torch.cuda.empty_cache()
-        gc.collect()
+        #gc.collect()
         valid_loss.update(val=loss.item(), n=1)
         pbar.update()
         pbar.set_postfix({'loss': valid_loss.avg})
