@@ -87,28 +87,32 @@ t = DocFeature(doc_id='A3A08FDF9D3C', seg_labels=all_labels.loc[all_labels['id']
 #all_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
 #                           raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
 
+try:
+    print('Dataset Loading...')
+    train_ds = torch.load('train_ds.pt')
+    dev_ds = torch.load('dev_ds.pt')
+    test_ds = torch.load('test_ds.pt')
 
-train_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-                             raw_text=train_doc_texts[train_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(train_doc_ids)]
-dev_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
-                           raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(dev_doc_ids)]
-test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.index(
-    ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in test_doc_ids]
+except FileNotFoundError:
+    print('Create Dataset')
+    train_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
+                                raw_text=train_doc_texts[train_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(train_doc_ids)]
+    dev_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
+                            raw_text=dev_doc_texts[dev_doc_ids.index(ids)], train_or_test='train', tokenizer=TOKENIZER) for ids in tqdm(dev_doc_ids)]
+    test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.index(
+        ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in test_doc_ids]
 
-train_features = [f for f in train_features if f.err is False]
-dev_features = [f for f in dev_features if f.err is False]
-test_features = [f for f in test_features if f.err is False]
-
-train_ds = create_tensor_ds_sliding_window(train_features)
-dev_ds = create_tensor_ds_sliding_window(dev_features)
-test_ds = create_tensor_ds_sliding_window_test(dev_features)
+    train_features = [f for f in train_features if f.err is False]
 
 
+    train_ds = create_tensor_ds_sliding_window(train_features)
+    dev_ds = create_tensor_ds_sliding_window(dev_features)
+    test_ds = create_tensor_ds_sliding_window_test(dev_features)
 
-# Due to design of huggingface's tokenizer, not possible to multithread to speed up the loading
-# Better run once and load for future development
-#train_ds = torch.load('train_ds.pt')
-#dev_ds = torch.load('dev_ds.pt')
+    print('Dataset Saving...')
+    torch.save(train_ds, 'train_ds.pt')
+    torch.save(dev_ds,'dev_ds.pt')
+    torch.save(test_ds, 'test_ds.pt')
 
 
 train_sp = RandomSampler(train_ds)
