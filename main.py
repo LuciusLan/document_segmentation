@@ -153,7 +153,7 @@ type_loss = FocalLoss(ignore_index=0, gamma=2)
 seg_loss = FocalLoss(ignore_index=0, gamma=2)
 
 bert_param_optimizer = list(model.transformer.named_parameters())
-ner_fc_param_optimizer = list(model.plain_ner.named_parameters())
+ner_fc_param_optimizer = list(model.ner.named_parameters())
 no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
 
 if not BASELINE:

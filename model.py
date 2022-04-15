@@ -19,8 +19,9 @@ class TModel(nn.Module):
                 pretrained_model_name_or_path="roberta-base", cache_dir=MODEL_CACHE_DIR, config=config)
         self.dropout = nn.Dropout()
         self.relu = nn.ReLU(True)
-        self.plain_ner = nn.Linear(config.hidden_size, len(LABEL_BIO))
-        if not BASELINE:
+        if BASELINE:
+            self.ner = nn.Linear(config.hidden_size, len(LABEL_BIO))
+        else:
             self.boundary_encoder = nn.LSTM(bidirectional=True, input_size=config.hidden_size, hidden_size=LSTM_HIDDEN, batch_first=True)
             self.boundary_decoder = nn.LSTM(bidirectional=False, input_size=LSTM_HIDDEN*2, hidden_size=LSTM_HIDDEN, batch_first=True)
             self.boundary_biaffine = BoundaryBiaffine(LSTM_HIDDEN, LSTM_HIDDEN*2, len(BOUNDARY_LABEL_UNIDIRECTION))
