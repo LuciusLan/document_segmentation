@@ -10,7 +10,7 @@ import re
 import itertools
 import six
 
-sent_tok = nltk.data.load(f"tokenizers/punkt/English.pickle")
+# sent_tok = nltk.data.load(f"tokenizers/punkt/English.pickle")
 re_bos = re.compile(r'^\s?\W?(?:(?:[A-Z]{1}[a-z]+)|(?:I))\s?[a-z]*')
 re_eos = re.compile(r'[?\.!]\'?\"?\s*$')
 
