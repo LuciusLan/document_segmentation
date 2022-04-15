@@ -11,8 +11,12 @@ from typing import Optional
 class TModel(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.transformer = AutoModel.from_pretrained(
-            pretrained_model_name_or_path="roberta-base", cache_dir=MODEL_CACHE_DIR, config=config)
+        if LONGBERT:
+            self.transformer = AutoModel.from_pretrained(
+                pretrained_model_name_or_path="allenai/longformer-base-4096", cache_dir=MODEL_CACHE_DIR, config=config)
+        else:
+            self.transformer = AutoModel.from_pretrained(
+                pretrained_model_name_or_path="roberta-base", cache_dir=MODEL_CACHE_DIR, config=config)
         self.dropout = nn.Dropout()
         self.relu = nn.ReLU(True)
         self.plain_ner = nn.Linear(config.hidden_size, len(LABEL_BIO))
@@ -144,6 +148,7 @@ class BoundaryBiaffine(nn.Module):
         self.V = nn.Linear(input2_size, output_size)
 
     def forward(self, input1, input2):
+        # Changed from original pairwise biaffine, U is only on input1 (d_j) V is only on input2 (h_i^Bdy)
         return self.W_bilin(input1, input2).add(self.U(input1).unsqueeze(2)).add(self.V(input2).unsqueeze(1))
 
 class FocalLoss(torch.nn.Module):

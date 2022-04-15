@@ -1,5 +1,5 @@
 from params import *
-from data import DocFeature, create_tensor_ds_sliding_window, create_tensor_ds_sliding_window_test
+from data import DocFeature, create_tensor_ds_sliding_window, create_tensor_ds_sliding_window_test, create_tensor_ds
 from model import TModel, FocalLoss
 
 import numpy as np
@@ -20,7 +20,10 @@ import os
 import gc
 import math
 
-TOKENIZER = AutoTokenizer.from_pretrained("roberta-base", cache_dir=MODEL_CACHE_DIR)
+if LONGBERT:
+    TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096", cache_dir=MODEL_CACHE_DIR)
+else:
+    TOKENIZER = AutoTokenizer.from_pretrained("roberta-base", cache_dir=MODEL_CACHE_DIR)
 # Add special token for new paragraph
 TOKENIZER.add_special_tokens({'additional_special_tokens': ['[NP]']})
 
@@ -104,10 +107,15 @@ except FileNotFoundError:
 
     train_features = [f for f in train_features if f.err is False]
 
+    if LONGBERT:
+        train_ds = create_tensor_ds(train_features)
+        dev_ds = create_tensor_ds(dev_features)
+        test_ds = create_tensor_ds(dev_features)
 
-    train_ds = create_tensor_ds_sliding_window(train_features)
-    dev_ds = create_tensor_ds_sliding_window(dev_features)
-    test_ds = create_tensor_ds_sliding_window_test(dev_features)
+    else:
+        train_ds = create_tensor_ds_sliding_window(train_features)
+        dev_ds = create_tensor_ds_sliding_window(dev_features)
+        test_ds = create_tensor_ds_sliding_window_test(dev_features)
 
     print('Dataset Saving...')
     torch.save(train_ds, 'train_ds.pt')
@@ -128,8 +136,10 @@ def custom_batch_collation(x):
 train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp, collate_fn=custom_batch_collation)
 dev_dl = DataLoader(dev_ds, batch_size=2, sampler=dev_sp, collate_fn=custom_batch_collation)
 
-
-config = AutoConfig.from_pretrained("roberta-base")
+if LONGBERT:
+    config = AutoConfig.from_pretrained("allenai/longformer-base-4096")
+else:
+    config = AutoConfig.from_pretrained("roberta-base")
 config.num_labels = NUM_LABELS
 model = TModel(config=config)
 #model = torch.load('model.pt')

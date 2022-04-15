@@ -18,4 +18,5 @@ NUM_EPOCH = 5
 LSTM_HIDDEN = 100
 BIAFFINE_DROPOUT = 0.3
 BASELINE = False
-MODEL_CACHE_DIR = 'D:\\Dev\\roberta-base'
+LONGBERT = False # True when using Longformer / Bigbird
+#MODEL_CACHE_DIR = PATH_TO_CACHE
