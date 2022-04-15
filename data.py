@@ -599,13 +599,17 @@ def pad_sequences(sequences, maxlen=None, dtype='int32',
 
 def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
     input_ids = []
-    labels = []
+    labels_bio = []
+    labels_boundary = []
+    labels_type = []
     attention_masks = []
     subword_masks = []
     cls_pos = []
     for feat in features:
         input_ids.append(feat.input_ids)
-        labels.append(feat.labels)
+        labels_bio.append(feat.labels_bio)
+        labels_boundary.append(feat.boundary_label)
+        labels_type.append(feat.labels)
         attention_masks.append([1]*len(feat.input_ids))
         subword_masks.append(feat.subword_masks)
         cls_pos.append(feat.cls_pos)
@@ -613,10 +617,18 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
                               maxlen=MAX_LEN, value=0, padding="post",
                               dtype="long", truncating="post").tolist()
     input_ids = torch.LongTensor(input_ids)
-    labels = pad_sequences(labels,
+    labels_bio = pad_sequences(labels_bio,
                            maxlen=MAX_LEN, value=0, padding="post",
                            dtype="long", truncating="post").tolist()
-    labels = torch.LongTensor(labels)
+    labels_bio = torch.LongTensor(labels_bio)
+    labels_boundary = pad_sequences(labels_boundary,
+                           maxlen=MAX_LEN, value=0, padding="post",
+                           dtype="long", truncating="post").tolist()
+    labels_boundary = torch.LongTensor(labels_boundary)
+    labels_type = pad_sequences(labels_type,
+                           maxlen=MAX_LEN, value=0, padding="post",
+                           dtype="long", truncating="post").tolist()
+    labels_type = torch.LongTensor(labels_type)
     attention_masks = pad_sequences(attention_masks,
                                     maxlen=MAX_LEN, value=0, padding="post",
                                     dtype="long", truncating="post").tolist()
@@ -625,7 +637,7 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
                                   maxlen=MAX_LEN, value=0, padding="post",
                                   dtype="long", truncating="post").tolist()
     subword_masks = torch.LongTensor(subword_masks)
-    return TensorDataset(input_ids, labels, attention_masks, subword_masks)
+    return TensorDataset(input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks)
 
 
 class SlidingWindowDataset(Dataset):

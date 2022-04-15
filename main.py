@@ -301,15 +301,15 @@ for i in range(NUM_EPOCH):
                 seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
                 loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
                 
-                preds.append(ner_logits.argmax(-1).detach().cpu().tolist())
-                targets.append(labels_bio.detach().cpu().tolist())
+                preds.append(ner_logits.argmax(-1).view(-1)[active_padding_mask].detach().cpu().tolist())
+                targets.append(labels_bio.view(-1)[active_padding_mask].detach().cpu().tolist())
         #torch.cuda.empty_cache()
         #gc.collect()
         valid_loss.update(val=loss.item(), n=1)
         pbar.update()
         pbar.set_postfix({'loss': valid_loss.avg})
     
-    preds=list(itertools.chain.from_iterable(list(itertools.chain.from_iterable(preds))))
-    targets=list(itertools.chain.from_iterable(list(itertools.chain.from_iterable(targets))))
+    preds=list(itertools.chain.from_iterable(preds))
+    targets=list(itertools.chain.from_iterable(targets))
     print(classification_report(targets, preds, digits=4))
 print()
