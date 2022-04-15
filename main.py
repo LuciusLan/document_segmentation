@@ -312,4 +312,5 @@ for i in range(NUM_EPOCH):
     preds=list(itertools.chain.from_iterable(preds))
     targets=list(itertools.chain.from_iterable(targets))
     print(classification_report(targets, preds, digits=4))
+    
 print()
