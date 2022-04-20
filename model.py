@@ -1,5 +1,3 @@
-from unicodedata import bidirectional
-import transformers
 from params import *
 import torch.nn as nn
 import torch.nn.functional as F

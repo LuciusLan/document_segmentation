@@ -1,4 +1,3 @@
-from posixpath import split
 from params import *
 import pandas as pd
 import nltk
