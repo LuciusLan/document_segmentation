@@ -8,7 +8,7 @@ LABEL_BIO = {'PAD':0, 'B1': 1, 'I1': 2, 'B2': 3, 'I2': 4, 'B3': 5, 'I3': 6, 'B4'
              'B6': 11, 'I6': 12, 'B7': 13, 'I7': 14, 'O': 15}
 BOUNDARY_LABEL = {'PAD':0, 'B': 1, 'E': 2, 'O': 3}
 BOUNDARY_LABEL_UNIDIRECTION = {'PAD':0, 'B': 1, 'O': 3}
-TEST_SIZE = 0
+TEST_SIZE = 0 #Test size is 0 because testset is on kaggle
 DEV_SIZE = 0.1
 MAX_LEN = 512
 NUM_LABELS = 16
