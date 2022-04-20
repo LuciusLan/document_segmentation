@@ -1,3 +1,4 @@
+from posixpath import split
 from params import *
 import pandas as pd
 import nltk
@@ -13,6 +14,8 @@ import six
 re_bos = re.compile(r'^\s?\W?(?:(?:[A-Z]{1}[a-z]+)|(?:I))\s?[a-z]*')
 re_eos = re.compile(r'[?\.!]\'?\"?\s*$')
 
+if LONGBERT:
+    MAX_LEN = 1024
 
 def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tuple[list]":
     """
@@ -638,6 +641,35 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
     subword_masks = torch.LongTensor(subword_masks)
     return TensorDataset(input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks)
 
+def create_tensor_ds_test(features: "list[DocFeature]") -> TensorDataset:
+    input_ids = []
+    attention_masks = []
+    subword_masks = []
+    cls_pos=[]
+    sliding_window_pos=[]
+    for feat in features:
+        input_ids.append(feat.input_ids)
+        attention_masks.append([1]*len(feat.input_ids))
+        subword_masks.append(feat.subword_masks)
+        cls_pos.append(feat.cls_pos)
+        sliding_window_pos.append(
+                [[0,0], feat.doc_id])
+
+    input_ids = pad_sequences(input_ids,
+                              maxlen=MAX_LEN, value=0, padding="post",
+                              dtype="long", truncating="post").tolist()
+    input_ids = torch.LongTensor(input_ids)
+
+    attention_masks = pad_sequences(attention_masks,
+                                    maxlen=MAX_LEN, value=0, padding="post",
+                                    dtype="long", truncating="post").tolist()
+    attention_masks = torch.LongTensor(attention_masks)
+    subword_masks = pad_sequences(subword_masks,
+                                  maxlen=MAX_LEN, value=0, padding="post",
+                                  dtype="long", truncating="post").tolist()
+    subword_masks = torch.LongTensor(subword_masks)
+    subword_masks = torch.LongTensor(subword_masks)
+    return SlidingWindowDatasetTest(input_ids, attention_masks, subword_masks, cls_pos, sliding_window_pos)
 
 class SlidingWindowDataset(Dataset):
     def __init__(self, input_ids: torch.Tensor,  labels_type: torch.Tensor, labels_bio: torch.Tensor, labels_boundary: torch.Tensor, attention_masks: torch.Tensor,
@@ -697,7 +729,7 @@ def create_tensor_ds_sliding_window(features: "list[DocFeature]") -> TensorDatas
             subword_masks.append(feat.sliding_window.subword_masks[i])
             cls_pos.append(feat.sliding_window.cls_pos)
             sliding_window_pos.append(
-                [feat.sliding_window.sliding_window, feat.doc_id])
+                [feat.sliding_window.sliding_window[i], feat.doc_id])
             if len(feat.sliding_window.input_ids[i]) > MAX_LEN:
                 c += 1
             if feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i][1]:
@@ -748,7 +780,7 @@ def create_tensor_ds_sliding_window_test(features: "list[DocFeature]") -> Tensor
             subword_masks.append(feat.sliding_window.subword_masks[i])
             cls_pos.append(feat.sliding_window.cls_pos)
             sliding_window_pos.append(
-                [feat.sliding_window.sliding_window, feat.doc_id])
+                [feat.sliding_window.sliding_window[i], feat.doc_id])
             if len(feat.sliding_window.input_ids[i]) > MAX_LEN:
                 c += 1
             if feat.sliding_window.sliding_window[i][0] == feat.sliding_window.sliding_window[i][1]:
