@@ -106,6 +106,8 @@ except FileNotFoundError:
         ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in test_doc_ids]
 
     train_features = [f for f in train_features if f.err is False]
+    dev_features = [f for f in dev_features if f.err is False]
+    test_features = [f for f in test_features if f.err is False]
 
     if LONGBERT:
         train_ds = create_tensor_ds(train_features)
@@ -140,7 +142,6 @@ if LONGBERT:
     config = AutoConfig.from_pretrained("allenai/longformer-base-4096")
 else:
     config = AutoConfig.from_pretrained("roberta-base")
-config.num_labels = NUM_LABELS
 model = TModel(config=config)
 #model = torch.load('model.pt')
 model = model.to('cuda')
