@@ -1,3 +1,4 @@
+from posixpath import split
 from params import *
 import pandas as pd
 import nltk
@@ -9,7 +10,7 @@ import re
 import itertools
 import six
 
-sent_tok = nltk.data.load(f"tokenizers/punkt/English.pickle")
+# sent_tok = nltk.data.load(f"tokenizers/punkt/English.pickle")
 re_bos = re.compile(r'^\s?\W?(?:(?:[A-Z]{1}[a-z]+)|(?:I))\s?[a-z]*')
 re_eos = re.compile(r'[?\.!]\'?\"?\s*$')
 
@@ -27,75 +28,78 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         discourse_type: list of segments' type
         subword_mask: list of subword masks (for post-processing)
     """
+    err = False
     new_segements = []
     prev_end = -1
+    prev_shift = 0
+    prev_label = -1
     subword_mask = []
     seg_labels = []
     raw_text = raw_text.replace('\xa0', ' ')
+    raw_text = raw_text.replace('Â', '')
     prev_eos = True
+    splitted = re.sub('\n+', ' [NP]', raw_text).split(' ')
     for _, segment in labels.iterrows():
         seg_ids = []
-        seg_subword_mask = []
+        positions = segment['predictionstring'].split(' ')
+        positions = [int(e) for e in positions]
+        start = positions[0]
+        end = positions[-1]
         # Find is there any text before current discourse start and previous discourse end
         # Or any text before the first discourse start
-        if (prev_end + 1 != int(segment['discourse_start']) and prev_end != int(segment['discourse_start'])) or (prev_end == -1 and int(segment['discourse_start']) != 0):
+
+        # Find if there is still any span before current discourse start and prev discourse end
+        if prev_end < start or (prev_end == -1 and start != 0):
             if prev_end == -1:
-                hold_seg = raw_text[: int(segment['discourse_start'])]
-            elif raw_text[prev_end] in ['.', ' ', '!', '?']:
-                hold_seg = raw_text[prev_end +
-                                    1: int(segment['discourse_start'])]
+                hold_seg = splitted[: start]
             else:
-                hold_seg = raw_text[prev_end: int(segment['discourse_start'])]
+                hold_seg = splitted[prev_end: start]
+            hold_seg = ' '.join(hold_seg)
             hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
             temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
             temp_ids = []
-            temp_subword = []
             temp_label = []
-            for sent in temp_sents:
+            for i, sent in enumerate(temp_sents):
                 tokenized_hold = tokenizer(sent)
                 hold_seg_ids = tokenized_hold['input_ids']
-                hold_subword_mask = tokenized_hold.word_ids(0)
                 # Remove [CLS] or [SEP] token if segment start is not start of new sentence
                 # or segment end not end of sentence
                 # If previous segment ends with EOS, assign bos to current segment
-                if not re_bos.search(sent) and not prev_eos:
+                if (not re_bos.search(sent)) and (not prev_eos):
                     hold_seg_ids = hold_seg_ids[1:]
-                    hold_subword_mask = hold_subword_mask[1:]
                 if not re_eos.search(sent):
                     hold_seg_ids = hold_seg_ids[:-1]
-                    hold_subword_mask = hold_subword_mask[:-1]
                     prev_eos = False
                 else:
                     prev_eos = True
-                temp_label.extend([8]*len(hold_seg_ids))
+                if i == 0 and prev_shift == len(sent.split(' ')):
+                    temp_label.extend([prev_label]*len(hold_seg_ids))
+                else:
+                    temp_label.extend([8]*len(hold_seg_ids))
                 temp_ids.extend(hold_seg_ids)
-                temp_subword.extend(hold_subword_mask)
 
-            if len(temp_ids) != 0 and len(temp_subword) != 0 and len(temp_label) != 0:
+            if len(temp_ids) != 0 and len(temp_label) != 0:
                 new_segements.append(temp_ids)
-                subword_mask.append(temp_subword)
                 seg_labels.append(temp_label)
 
-        seg = raw_text[int(segment['discourse_start'])                       : int(segment['discourse_end'])]
+        seg = splitted[start:end+1]
+        seg = ' '.join(seg)
         # Insert special token for New Paragraph (strong indicator for boundary)
         seg = re.sub('\n+', ' [NP] ', seg)
 
         temp_sents = nltk.tokenize.sent_tokenize(seg)
         temp_ids = []
-        temp_subword = []
         temp_label = []
         for sent in temp_sents:
             tokenized_sent = tokenizer(sent)
+            a='For example, the text states, ¨A thick atmosphere o'
             seg_ids = tokenized_sent['input_ids']
-            seg_subword_mask = tokenized_sent.word_ids(0)
             # Remove [CLS] or [SEP] token if segment start is not start of new sentence
             # or segment end not end of sentence
-            if not re_bos.search(sent) and not prev_eos:
+            if (not re_bos.search(sent) and not prev_eos) and sent != '[NP]':
                 seg_ids = seg_ids[1:]
-                seg_subword_mask = seg_subword_mask[1:]
-            if not re_eos.search(sent):
+            if (not re_eos.search(sent)) and sent != '[NP]':
                 seg_ids = seg_ids[:-1]
-                seg_subword_mask = seg_subword_mask[:-1]
                 prev_eos = False
             else:
                 prev_eos = True
@@ -103,47 +107,85 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
                 LABEL_2_ID[segment['discourse_type']]]*len(seg_ids)
             temp_label.extend(current_seg_label)
             temp_ids.extend(seg_ids)
-            temp_subword.extend(seg_subword_mask)
-        if len(temp_ids) != 0 and len(temp_subword) != 0 and len(temp_label) != 0:
+        if len(temp_ids) != 0 and len(temp_label) != 0:
             seg_labels.append(temp_label)
             new_segements.append(temp_ids)
-            subword_mask.append(temp_subword)
-        prev_end = int(segment['discourse_end'])
+        if len(positions) < len(segment['discourse_text'].split(' ')) and segment['discourse_text'].split(' ') != '':
+            prev_shift = len(segment['discourse_text'].split(' ')) - len(positions)
+            prev_label = current_seg_label[0]
+        else:
+            prev_shift = 0
+        prev_end = end+1
 
     # Find is there any text after the last discourse end
-    if int(segment['discourse_end']) < len(raw_text):
+    if end+1 < len(splitted):
         hold_seg_ids = []
-        hold_subword_mask = []
-        hold_seg = raw_text[int(segment['discourse_end']):]
-        hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
-        temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
-        temp_ids = []
-        temp_subword = []
-        temp_label = []
-        for sent in temp_sents:
-            tokenized_hold = tokenizer(sent)
-            hold_seg_ids = tokenized_hold['input_ids']
-            hold_subword_mask = tokenized_hold.word_ids(0)
-            # Remove [CLS] or [SEP] token if segment start is not start of new sentence
-            # or segment end not end of sentence
-            if not re_bos.search(sent) and not prev_eos:
-                hold_seg_ids = hold_seg_ids[1:]
-                hold_subword_mask = hold_subword_mask[1:]
-            if not re_eos.search(sent):
-                hold_seg_ids = hold_seg_ids[:-1]
-                hold_subword_mask = hold_subword_mask[:-1]
-                prev_eos = False
-            else:
-                prev_eos = True
-            temp_label.extend([8]*len(hold_seg_ids))
-            temp_ids.extend(hold_seg_ids)
-            temp_subword.extend(hold_subword_mask)
-        if len(temp_ids) != 0 and len(temp_subword) != 0 and len(temp_label) != 0:
-            new_segements.append(temp_ids)
-            subword_mask.append(temp_subword)
-            seg_labels.append(temp_label)
+        hold_seg = splitted[end+1:]
+        hold_seg = [e for e in hold_seg if e != '']
+        if len(hold_seg) > 0:
+            hold_seg = ' '.join(hold_seg)
+            hold_seg = re.sub('\n+', ' [NP] ', hold_seg)
+            temp_sents = nltk.tokenize.sent_tokenize(hold_seg)
+            temp_ids = []
+            temp_label = []
+            for i, sent in enumerate(temp_sents):
+                tokenized_hold = tokenizer(sent)
+                hold_seg_ids = tokenized_hold['input_ids']
+                # Remove [CLS] or [SEP] token if segment start is not start of new sentence
+                # or segment end not end of sentence
+                if not re_bos.search(sent) and not prev_eos:
+                    hold_seg_ids = hold_seg_ids[1:]
+                if not re_eos.search(sent):
+                    hold_seg_ids = hold_seg_ids[:-1]
+                    prev_eos = False
+                else:
+                    prev_eos = True
+                if i == 0 and prev_shift == len(sent.split(' ')):
+                    temp_label.extend([prev_label]*len(hold_seg_ids))
+                else:
+                    temp_label.extend([8]*len(hold_seg_ids))
+                temp_ids.extend(hold_seg_ids)
+            if len(temp_ids) != 0 and len(temp_label) != 0:
+                new_segements.append(temp_ids)
+                seg_labels.append(temp_label)
 
-    return new_segements, seg_labels, subword_mask
+
+    tokenized = []
+    for e in new_segements:
+        tokenized.extend(tokenizer.convert_ids_to_tokens(e))
+    
+    tok_counter = 0
+    hold = ''
+    for i, tok in enumerate(tokenized):
+        # Assign special token subword mask -1
+        # '[NP]' needs to be treated differently, as part of word
+        if tok in ['<s>', '</s>']:
+            subword_mask.append(-1)
+            continue
+        # RoBERTa and Longformer tokenizer use this char to denote start of new word
+        if tok.startswith('Ġ'):
+            tok = tok[1:]
+        #if tok in ['Â']:
+        #    print()
+        #    continue
+        # If BERT token matches simple split token, append position as subword mask
+        if splitted[tok_counter] == tok:
+            subword_mask.append(tok_counter)
+            tok_counter+=1
+            hold = ''
+        # Else, combine the next BERT token until there is a match (e.g.: original: "Abcdefgh", BERT: "Abc", "def", "gh")
+        # each subword of full word are assigned same full word position
+        else:
+            hold+=tok
+            subword_mask.append(tok_counter)
+            if splitted[tok_counter] == hold:
+                hold = ''
+                tok_counter+=1
+        # if combined token length larger than 50, most likely something wrong happened
+        if len(hold)>50:
+            err = True
+    assert len(subword_mask) == len(list(itertools.chain.from_iterable(new_segements))) == len(list(itertools.chain.from_iterable(seg_labels))), "Length of ids/labels/subword_mask mismatch"
+    return new_segements, seg_labels, subword_mask, err
 
 
 def preprocessing_test(raw_text: str, tokenizer) -> "tuple[list]":
@@ -153,13 +195,44 @@ def preprocessing_test(raw_text: str, tokenizer) -> "tuple[list]":
     """
     ids = []
     subword_mask = []
+    err = False
+    raw_text = raw_text.replace('\xa0', ' ')
     raw_text = re.sub('\n+', ' [NP] ', raw_text)
     temp_sents = nltk.tokenize.sent_tokenize(raw_text)
     for sent in temp_sents:
         tokenized_sent = tokenizer(sent)
         ids.extend(tokenized_sent['input_ids'])
-        subword_mask.extend(tokenized_sent.word_ids(0))
-    return ids, subword_mask
+
+    tokenized = tokenizer.convert_ids_to_tokens(ids)
+    splitted = re.sub('\n+', ' [NP] ', raw_text).split(' ')
+    tok_counter = 0
+    hold = ''
+    for i, tok in enumerate(tokenized):
+        # Assign special token subword mask -1
+        # '[NP]' needs to be treated differently, as part of word
+        if tok in ['<s>', '</s>']:
+            subword_mask.append(-1)
+            continue
+        # RoBERTa and Longformer tokenizer use this char to denote start of new word
+        if tok.startswith('Ġ'):
+            tok = tok[1:]
+        # If BERT token matches simple split token, append position as subword mask
+        if splitted[tok_counter] == tok:
+            subword_mask.append(tok_counter)
+            tok_counter+=1
+            hold = ''
+        # Else, combine the next BERT token until there is a match (e.g.: original: "Abcdefgh", BERT: "Abc", "def", "gh")
+        # each subword of full word are assigned same full word position
+        else:
+            hold+=tok
+            subword_mask.append(tok_counter)
+            if splitted[tok_counter] == hold:
+                hold = ''
+                tok_counter+=1
+        # if combined token length larger than 50, most likely something wrong happened
+        if len(hold)>50:
+            err = True
+    return ids, subword_mask, err
 
 
 class SlidingWindowFeature():
@@ -214,7 +287,7 @@ class DocFeature():
         self.doc_id = doc_id
         self.tokenizer = tokenizer
         if train_or_test == 'train':
-            self.input_ids, self.seg_labels, self.subword_masks = preprocessing_train(
+            self.input_ids, self.seg_labels, self.subword_masks, self.err = preprocessing_train(
                 labels=seg_labels, raw_text=raw_text, tokenizer=tokenizer)
             #self.labels = [[label]*len(seg) for seg, label in zip(self.input_ids, label_ids)]
             self.labels_bio = [self.convert_label_to_bio(label, len(
@@ -224,10 +297,6 @@ class DocFeature():
             self.labels = list(itertools.chain.from_iterable(self.seg_labels))
             self.input_ids = list(
                 itertools.chain.from_iterable(self.input_ids))
-            self.subword_masks = list(
-                itertools.chain.from_iterable(self.subword_masks))
-            self.subword_masks = [
-                -1 if e is None else e for e in self.subword_masks]
             self.boundary_pos = self.get_boundary_pos()
             self.cls_pos = [index for index, element in enumerate(
                 self.input_ids) if element == tokenizer.cls_token_id]
@@ -235,10 +304,8 @@ class DocFeature():
             self.boundary_label = self.convert_label_to_bound()
             self.sliding_window = self.create_sliding_window_train()
         elif train_or_test == 'test':
-            self.input_ids, self.subword_masks = preprocessing_test(
+            self.input_ids, self.subword_masks, self.err = preprocessing_test(
                 raw_text, tokenizer=tokenizer)
-            self.subword_masks = [
-                -1 if e is None else e for e in self.subword_masks]
             self.cls_pos = [index for index, element in enumerate(
                 self.input_ids) if element == tokenizer.cls_token_id]
             self.sliding_window = self.create_sliding_window_test()
@@ -532,13 +599,17 @@ def pad_sequences(sequences, maxlen=None, dtype='int32',
 
 def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
     input_ids = []
-    labels = []
+    labels_bio = []
+    labels_boundary = []
+    labels_type = []
     attention_masks = []
     subword_masks = []
     cls_pos = []
     for feat in features:
         input_ids.append(feat.input_ids)
-        labels.append(feat.labels)
+        labels_bio.append(feat.labels_bio)
+        labels_boundary.append(feat.boundary_label)
+        labels_type.append(feat.labels)
         attention_masks.append([1]*len(feat.input_ids))
         subword_masks.append(feat.subword_masks)
         cls_pos.append(feat.cls_pos)
@@ -546,10 +617,18 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
                               maxlen=MAX_LEN, value=0, padding="post",
                               dtype="long", truncating="post").tolist()
     input_ids = torch.LongTensor(input_ids)
-    labels = pad_sequences(labels,
+    labels_bio = pad_sequences(labels_bio,
                            maxlen=MAX_LEN, value=0, padding="post",
                            dtype="long", truncating="post").tolist()
-    labels = torch.LongTensor(labels)
+    labels_bio = torch.LongTensor(labels_bio)
+    labels_boundary = pad_sequences(labels_boundary,
+                           maxlen=MAX_LEN, value=0, padding="post",
+                           dtype="long", truncating="post").tolist()
+    labels_boundary = torch.LongTensor(labels_boundary)
+    labels_type = pad_sequences(labels_type,
+                           maxlen=MAX_LEN, value=0, padding="post",
+                           dtype="long", truncating="post").tolist()
+    labels_type = torch.LongTensor(labels_type)
     attention_masks = pad_sequences(attention_masks,
                                     maxlen=MAX_LEN, value=0, padding="post",
                                     dtype="long", truncating="post").tolist()
@@ -558,7 +637,7 @@ def create_tensor_ds(features: "list[DocFeature]") -> TensorDataset:
                                   maxlen=MAX_LEN, value=0, padding="post",
                                   dtype="long", truncating="post").tolist()
     subword_masks = torch.LongTensor(subword_masks)
-    return TensorDataset(input_ids, labels, attention_masks, subword_masks)
+    return TensorDataset(input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks)
 
 
 class SlidingWindowDataset(Dataset):

@@ -1,5 +1,5 @@
 from params import *
-from data import DocFeature, create_tensor_ds_sliding_window, create_tensor_ds_sliding_window_test
+from data import DocFeature, create_tensor_ds_sliding_window, create_tensor_ds_sliding_window_test, create_tensor_ds
 from model import TModel, FocalLoss
 
 import numpy as np
@@ -20,7 +20,10 @@ import os
 import gc
 import math
 
-TOKENIZER = AutoTokenizer.from_pretrained("roberta-base", cache_dir=MODEL_CACHE_DIR)
+if LONGBERT:
+    TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096", cache_dir=MODEL_CACHE_DIR)
+else:
+    TOKENIZER = AutoTokenizer.from_pretrained("roberta-base", cache_dir=MODEL_CACHE_DIR)
 # Add special token for new paragraph
 TOKENIZER.add_special_tokens({'additional_special_tokens': ['[NP]']})
 
@@ -81,12 +84,11 @@ train_doc_texts = [all_doc_texts[i] for i in train_index]
 dev_doc_texts = [all_doc_texts[i] for i in dev_index]
 
 
-#t = DocFeature(doc_id='00C819ADE423', seg_labels=all_labels.loc[all_labels['id'] == '00C819ADE423'],
-#                             raw_text=all_doc_texts[all_doc_ids.index('00C819ADE423')], train_or_test='test', tokenizer=TOKENIZER)
+t = DocFeature(doc_id='A3A08FDF9D3C', seg_labels=all_labels.loc[all_labels['id'] == 'A3A08FDF9D3C'],
+                             raw_text=all_doc_texts[all_doc_ids.index('A3A08FDF9D3C')], train_or_test='train', tokenizer=TOKENIZER)
 
 #all_features = [DocFeature(doc_id=ids, seg_labels=all_labels.loc[all_labels['id'] == ids],
 #                           raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
-
 
 try:
     print('Dataset Loading...')
@@ -103,15 +105,22 @@ except FileNotFoundError:
     test_features = [DocFeature(doc_id=ids, raw_text=test_doc_texts[test_doc_ids.index(
         ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in test_doc_ids]
 
-    train_ds = create_tensor_ds_sliding_window(train_features)
-    dev_ds = create_tensor_ds_sliding_window(dev_features)
-    test_ds = create_tensor_ds_sliding_window_test(dev_features)
+    train_features = [f for f in train_features if f.err is False]
+
+    if LONGBERT:
+        train_ds = create_tensor_ds(train_features)
+        dev_ds = create_tensor_ds(dev_features)
+        test_ds = create_tensor_ds(dev_features)
+
+    else:
+        train_ds = create_tensor_ds_sliding_window(train_features)
+        dev_ds = create_tensor_ds_sliding_window(dev_features)
+        test_ds = create_tensor_ds_sliding_window_test(dev_features)
 
     print('Dataset Saving...')
     torch.save(train_ds, 'train_ds.pt')
     torch.save(dev_ds,'dev_ds.pt')
     torch.save(test_ds, 'test_ds.pt')
-
 
 
 train_sp = RandomSampler(train_ds)
@@ -127,8 +136,10 @@ def custom_batch_collation(x):
 train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp, collate_fn=custom_batch_collation)
 dev_dl = DataLoader(dev_ds, batch_size=2, sampler=dev_sp, collate_fn=custom_batch_collation)
 
-
-config = AutoConfig.from_pretrained("roberta-base")
+if LONGBERT:
+    config = AutoConfig.from_pretrained("allenai/longformer-base-4096")
+else:
+    config = AutoConfig.from_pretrained("roberta-base")
 config.num_labels = NUM_LABELS
 model = TModel(config=config)
 #model = torch.load('model.pt')
@@ -142,7 +153,7 @@ type_loss = FocalLoss(ignore_index=0, gamma=2)
 seg_loss = FocalLoss(ignore_index=0, gamma=2)
 
 bert_param_optimizer = list(model.transformer.named_parameters())
-ner_fc_param_optimizer = list(model.plain_ner.named_parameters())
+ner_fc_param_optimizer = list(model.ner.named_parameters())
 no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
 
 if not BASELINE:
@@ -300,15 +311,16 @@ for i in range(NUM_EPOCH):
                 seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
                 loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
                 
-                preds.append(ner_logits.argmax(-1).detach().cpu().tolist())
-                targets.append(labels_bio.detach().cpu().tolist())
+                preds.append(ner_logits.argmax(-1).view(-1)[active_padding_mask].detach().cpu().tolist())
+                targets.append(labels_bio.view(-1)[active_padding_mask].detach().cpu().tolist())
         #torch.cuda.empty_cache()
         #gc.collect()
         valid_loss.update(val=loss.item(), n=1)
         pbar.update()
         pbar.set_postfix({'loss': valid_loss.avg})
     
-    preds=list(itertools.chain.from_iterable(list(itertools.chain.from_iterable(preds))))
-    targets=list(itertools.chain.from_iterable(list(itertools.chain.from_iterable(targets))))
+    preds=list(itertools.chain.from_iterable(preds))
+    targets=list(itertools.chain.from_iterable(targets))
     print(classification_report(targets, preds, digits=4))
+    
 print()
