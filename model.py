@@ -17,7 +17,7 @@ class TModel(nn.Module):
         else:
             self.transformer = AutoModel.from_pretrained(
                 pretrained_model_name_or_path="roberta-base", cache_dir=MODEL_CACHE_DIR, config=config)
-        self.dropout = nn.Dropout()
+        self.dropout = nn.Dropout(BIAFFINE_DROPOUT)
         self.relu = nn.ReLU(True)
         if BASELINE:
             self.ner = nn.Linear(config.hidden_size, len(LABEL_BIO))
@@ -69,19 +69,21 @@ class TModel(nn.Module):
             return_dict=return_dict,
         )
         sequence_output = outputs[0]
-        sequence_output = self.dropout(sequence_output)
         if BASELINE:
-            ner_result = self.plain_ner(sequence_output)
+            ner_result = self.ner(sequence_output)
             return ner_result
         else:
             boundary_hidden = self.boundary_encoder(sequence_output)[0]
+            boundary_hidden = self.dropout(boundary_hidden)
             seg_result = self.get_trigram(boundary_hidden.transpose(1,2)).transpose(1,2)
             seg_result = self.boundary_decoder(seg_result)[0]
+            seg_result = self.dropout(seg_result)
             seg_matrix = self.boundary_biaffine(seg_result, boundary_hidden)
             #seg_result = F.softmax(self.boundary_biaffine(seg_result, boundary_hidden), dim=2)
             #seg_result = self.boundary_seg(seg_result, boundary_hidden)
             boundary_result = F.logsigmoid(self.boundary_final0(sequence_output)+self.boundary_final1(boundary_hidden)).mul(boundary_hidden)
             type_hidden = self.type_lstm(sequence_output)[0]
+            type_hidden = self.dropout(type_hidden)
             type_result = F.logsigmoid(self.type_final0(sequence_output)+self.type_final1(type_hidden)).mul(type_hidden)
             ner_result = F.logsigmoid(self.seg_final0(sequence_output)+self.seg_final1(seg_result)).mul(seg_result)
             ner_result = self.ner_final(torch.cat([sequence_output, boundary_result, type_result, seg_result], dim=-1))
