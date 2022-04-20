@@ -12,6 +12,8 @@ import six
 # sent_tok = nltk.data.load(f"tokenizers/punkt/English.pickle")
 re_bos = re.compile(r'^\s?\W?(?:(?:[A-Z]{1}[a-z]+)|(?:I))\s?[a-z]*')
 re_eos = re.compile(r'[?\.!]\'?\"?\s*$')
+re_urllike = re.compile(r'\w+\/\w+')
+re_longrepeat = re.compile(r'(.)\1{9,}')
 
 
 def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tuple[list]":
@@ -34,7 +36,14 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
     prev_label = -1
     subword_mask = []
     seg_labels = []
+    raw_text = raw_text.replace('¨', '"')
+    raw_text = raw_text.replace('\x92', '\'')
     raw_text = raw_text.replace('\xa0', ' ')
+    raw_text = raw_text.replace('´', '\'')
+    raw_text = re.sub(r'[^\x00-\x7f]', '', raw_text)
+    t = re.search(r'[^\u0000-\u007F]+', raw_text)
+    if t is not None:
+        print()
     raw_text = raw_text.replace('Â', '')
     prev_eos = True
     splitted = re.sub('\n+', ' [NP]', raw_text).split(' ')
@@ -46,7 +55,8 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         end = positions[-1]
         # Find is there any text before current discourse start and previous discourse end
         # Or any text before the first discourse start
-
+        if prev_end > start:
+            start = prev_end
         # Find if there is still any span before current discourse start and prev discourse end
         if prev_end < start or (prev_end == -1 and start != 0):
             if prev_end == -1:
@@ -91,7 +101,6 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         temp_label = []
         for sent in temp_sents:
             tokenized_sent = tokenizer(sent)
-            a='For example, the text states, ¨A thick atmosphere o'
             seg_ids = tokenized_sent['input_ids']
             # Remove [CLS] or [SEP] token if segment start is not start of new sentence
             # or segment end not end of sentence
@@ -161,6 +170,8 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
         if tok in ['<s>', '</s>']:
             subword_mask.append(-1)
             continue
+        if splitted[tok_counter] == '':
+            tok_counter+=1
         # RoBERTa and Longformer tokenizer use this char to denote start of new word
         if tok.startswith('Ġ'):
             tok = tok[1:]
@@ -181,7 +192,7 @@ def preprocessing_train(labels: pd.DataFrame, raw_text: str, tokenizer) -> "tupl
                 hold = ''
                 tok_counter+=1
         # if combined token length larger than 50, most likely something wrong happened
-        if len(hold)>50:
+        if len(hold)>50 and not re_urllike.search(hold) and not re_longrepeat.search(hold):
             err = True
     assert len(subword_mask) == len(list(itertools.chain.from_iterable(new_segements))) == len(list(itertools.chain.from_iterable(seg_labels))), "Length of ids/labels/subword_mask mismatch"
     return new_segements, seg_labels, subword_mask, err
