@@ -1,5 +1,5 @@
 from params import *
-from data import DocFeature, create_tensor_ds_sliding_window, create_tensor_ds_sliding_window_test, create_tensor_ds
+from data import DocFeature, create_tensor_ds_sliding_window, create_tensor_ds_sliding_window_test, create_tensor_ds, create_tensor_ds_test
 from model import TModel, FocalLoss
 
 import numpy as np
@@ -21,6 +21,7 @@ import gc
 import math
 
 if LONGBERT:
+    MAX_LEN = 1024
     TOKENIZER = AutoTokenizer.from_pretrained("allenai/longformer-base-4096", cache_dir=MODEL_CACHE_DIR)
 else:
     TOKENIZER = AutoTokenizer.from_pretrained("roberta-base", cache_dir=MODEL_CACHE_DIR)
@@ -50,6 +51,7 @@ def bound_to_matrix(bound: torch.Tensor) -> torch.LongTensor:
 
 all_doc_ids = []
 all_doc_texts = []
+print('Raw data loading...')
 for f in tqdm(list(os.listdir(TRAIN_PATH))):
     all_doc_ids.append(f.replace('.txt', ''))
     all_doc_texts.append(open(os.path.join(TRAIN_PATH, f),
@@ -91,10 +93,17 @@ t = DocFeature(doc_id='A3A08FDF9D3C', seg_labels=all_labels.loc[all_labels['id']
 #                           raw_text=all_doc_texts[all_doc_ids.index(ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in tqdm(all_doc_ids)]
 
 try:
-    print('Dataset Loading...')
-    train_ds = torch.load('train_ds.pt')
-    dev_ds = torch.load('dev_ds.pt')
-    test_ds = torch.load('test_ds.pt')
+    if LONGBERT:
+        print('Dataset Loading...')
+        train_ds = torch.load('long_train_ds.pt')
+        dev_ds = torch.load('long_dev_ds.pt')
+        test_ds = torch.load('long_test_ds.pt')
+
+    else :
+        print('Dataset Loading...')
+        train_ds = torch.load('roberta_train_ds.pt')
+        dev_ds = torch.load('roberta_dev_ds.pt')
+        test_ds = torch.load('roberta_test_ds.pt')
 
 except FileNotFoundError:
     print('Create Dataset')
@@ -106,27 +115,30 @@ except FileNotFoundError:
         ids)], train_or_test='test', tokenizer=TOKENIZER) for ids in test_doc_ids]
 
     train_features = [f for f in train_features if f.err is False]
-    dev_features = [f for f in dev_features if f.err is False]
-    test_features = [f for f in test_features if f.err is False]
 
     if LONGBERT:
         train_ds = create_tensor_ds(train_features)
         dev_ds = create_tensor_ds(dev_features)
-        test_ds = create_tensor_ds(dev_features)
+        test_ds = create_tensor_ds_test(test_features)
+        print('Dataset Saving...')
+        torch.save(train_ds, 'long_train_ds.pt')
+        torch.save(dev_ds,'long_dev_ds.pt')
+        torch.save(test_ds, 'long_test_ds.pt')
 
     else:
         train_ds = create_tensor_ds_sliding_window(train_features)
         dev_ds = create_tensor_ds_sliding_window(dev_features)
-        test_ds = create_tensor_ds_sliding_window_test(dev_features)
+        test_ds = create_tensor_ds_sliding_window_test(test_features)
+        print('Dataset Saving...')
+        torch.save(train_ds, 'roberta_train_ds.pt')
+        torch.save(dev_ds,'roberta_dev_ds.pt')
+        torch.save(test_ds, 'roberta_test_ds.pt')
 
-    print('Dataset Saving...')
-    torch.save(train_ds, 'train_ds.pt')
-    torch.save(dev_ds,'dev_ds.pt')
-    torch.save(test_ds, 'test_ds.pt')
 
 
 train_sp = RandomSampler(train_ds)
 dev_sp = RandomSampler(dev_ds)
+test_sp = RandomSampler(test_ds)
 def custom_batch_collation(x):
     num_elements = len(x[0])
     return_tup = [[] for _ in range(num_elements)]
@@ -137,11 +149,13 @@ def custom_batch_collation(x):
 
 train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sp, collate_fn=custom_batch_collation)
 dev_dl = DataLoader(dev_ds, batch_size=2, sampler=dev_sp, collate_fn=custom_batch_collation)
+test_dl = DataLoader(test_ds, batch_size=2, sampler=test_sp, collate_fn=custom_batch_collation)
 
 if LONGBERT:
     config = AutoConfig.from_pretrained("allenai/longformer-base-4096")
 else:
     config = AutoConfig.from_pretrained("roberta-base")
+config.num_labels = NUM_LABELS
 model = TModel(config=config)
 #model = torch.load('model.pt')
 model = model.to('cuda')
@@ -236,7 +250,12 @@ for i in range(NUM_EPOCH):
     for step, batch in enumerate(train_dl):
         bs = len(batch[0])
         optimizer.zero_grad()
-        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+        if LONGBERT:
+            input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks = batch 
+        else:
+            input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+
+        
         input_ids = torch.stack(input_ids).cuda()
         labels_type = torch.stack(labels_type).cuda()
         labels_bio = torch.stack(labels_bio).cuda()
@@ -279,6 +298,7 @@ for i in range(NUM_EPOCH):
         train_loss.update(loss.item(), n=input_ids.size(0))
         pbar.update()
         pbar.set_postfix({'loss': train_loss.avg})
+        break
     print(train_loss.avg)
     
     model.eval()
@@ -288,7 +308,11 @@ for i in range(NUM_EPOCH):
     targets = []
     for batch in dev_dl:
         bs = len(batch[0])
-        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+        if LONGBERT:
+            input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks = batch 
+        else:
+            input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+
         input_ids = torch.stack(input_ids).cuda()
         labels_type = torch.stack(labels_type).cuda()
         labels_bio = torch.stack(labels_bio).cuda()
@@ -426,14 +450,11 @@ pbar = tqdm(total=len(test_dl), desc='TestPredict')
 df_all=pd.DataFrame()
 for batch in test_dl:
     bs = len(batch[0])
-    if LONGBERT:
-        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks = batch 
+    if LONGBERT: # the sliding window for longbert is just the  truncated sentence+text_id
+        input_ids, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
     else:
-        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+        input_ids, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
     input_ids = torch.stack(input_ids).cuda()
-    labels_type = torch.stack(labels_type).cuda()
-    labels_bio = torch.stack(labels_bio).cuda()
-    labels_boundary = torch.stack(labels_boundary).cuda()
     attention_masks = torch.stack(attention_masks).cuda()
     subword_masks = torch.stack(subword_masks).cuda()
     active_padding_mask = attention_masks.view(-1) == 1
@@ -453,9 +474,6 @@ for batch in test_dl:
         with autocast():
             if BASELINE:
                 ner_logits = model(input_ids=input_ids, attention_mask=attention_masks)
-                ner_loss_ = bio_loss(
-                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
-                loss = ner_loss_
             else:
                 ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
 
