@@ -256,13 +256,19 @@ for i in range(NUM_EPOCH):
         matrix_padding_mask = pad_matrix.view(-1) == 1
         with autocast():
             #with torch.autograd.profiler.profile(use_cuda=True) as prof:
-            ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
-            ner_loss_ = bio_loss(
-                ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
-            boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
-            type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
-            seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
-            loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
+            if BASELINE:
+                ner_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                ner_loss_ = bio_loss(
+                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+                loss = ner_loss_
+            else:
+                ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                ner_loss_ = bio_loss(
+                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+                boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
+                type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
+                seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
+                loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
                 
             #print(prof.key_averages().table())
             loss.backward()
@@ -303,13 +309,20 @@ for i in range(NUM_EPOCH):
 
         with torch.no_grad():
             with autocast():
-                ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
-                ner_loss_ = bio_loss(
-                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
-                boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
-                type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
-                seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
-                loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
+                #with torch.autograd.profiler.profile(use_cuda=True) as prof:
+                if BASELINE:
+                    ner_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                    ner_loss_ = bio_loss(
+                        ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+                    loss = ner_loss_
+                else:
+                    ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                    ner_loss_ = bio_loss(
+                        ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+                    boundary_loss_ = boundary_loss(boundary_logits.view(-1, len(BOUNDARY_LABEL))[active_padding_mask], labels_boundary.view(-1)[active_padding_mask])
+                    type_loss_ = type_loss(type_logits.view(-1, len(LABEL_2_ID))[active_padding_mask], labels_type.view(-1)[active_padding_mask])
+                    seg_loss_ = seg_loss(seg_logits.view(-1, len(BOUNDARY_LABEL_UNIDIRECTION))[matrix_padding_mask], boundary_matrix.view(-1)[matrix_padding_mask])
+                    loss = ner_loss_+boundary_loss_+type_loss_+seg_loss_
                 
                 preds.append(ner_logits.argmax(-1).view(-1)[active_padding_mask].detach().cpu().tolist())
                 targets.append(labels_bio.view(-1)[active_padding_mask].detach().cpu().tolist())
@@ -322,5 +335,155 @@ for i in range(NUM_EPOCH):
     preds=list(itertools.chain.from_iterable(preds))
     targets=list(itertools.chain.from_iterable(targets))
     print(classification_report(targets, preds, digits=4))
+
+##output prediction in Kaggle submission format
+BIO_LABEL={ 1:'Claim', 3:'Evidence', 5: 'Position', 7:'Concluding Statement',  9:'Lead', 11:'Counterclaim', 13: 'Rebuttal'}
+
+def submit_formatting(ner_logits_i, subword_masks_i, text_id):
+    dataframe=pd.DataFrame()
+    positions=[]
+    labels=[]
+    end_prediction=subword_masks_i.max()
+    subword_masks_i_replace=np.where(subword_masks_i ==-1, 9999, subword_masks_i)
+    start_position=subword_masks_i_replace.min()
+#     print('start_position:', start_position)
     
+    prev_e=None
+    prev_position=None
+    for i in range(len(ner_logits_i)):
+
+        e=ner_logits_i[i]
+        position=subword_masks_i[i]
+        
+        if position!=-1:
+            non_S_position=position
+        
+        if (prev_position is None) and e % 2==1 and e!=15 and position==-1:
+            position=start_position
+            label= BIO_LABEL[e]
+            positions.append(position)
+            labels.append(label)
+            prev_e=e
+            prev_position=position
+        
+        elif (prev_position is None) and e % 2==1 and e!=15 and position!=-1:
+            label= BIO_LABEL[e]
+            positions.append(position)
+            labels.append(label)
+            prev_e=e
+            prev_position=position
+
+        elif e % 2==1 and e!=15 and position!=-1 and e!=prev_e and position!=prev_position:
+            label= BIO_LABEL[e]
+            positions.append(position)
+            labels.append(label)
+            prev_e=e
+            prev_position=position
+        
+        elif e % 2==1 and e!=15 and position==-1 and position!=prev_position:
+            position=non_S_position
+            label= BIO_LABEL[e]
+            positions.append(position)
+            labels.append(label)
+            prev_e=e
+            prev_position=position           
+            
+    
+    positions.append(end_prediction)
+    positions=list(positions)
+
+    length=len(positions)
+    # print(positions)
+    if length==1:
+        list_=[]
+        dict1={}
+        dict1['id'] = text_id
+        dict1['class']= 'Evidence'
+        list_=[str(e) for e in range(0, positions[-1])]
+        dict1['predictionstring']=" ".join(list_)
+        
+    else:
+        
+        pointer = 0
+        while pointer < length-1:
+            list_=[]
+            dict1={}
+            dict1['id'] = text_id
+            dict1['class']= labels[pointer]
+            list_=[str(e) for e in range(positions[pointer], positions[pointer+1])]
+            dict1['predictionstring']=" ".join(list_)
+            # print(dict1)
+            dataframe=dataframe.append(dict1, ignore_index=True)
+            pointer+=1
+
+    return dataframe
+ 
+    
+model.eval()
+valid_loss = AverageMeter()
+pbar = tqdm(total=len(test_dl), desc='TestPredict')
+df_all=pd.DataFrame()
+for batch in test_dl:
+    bs = len(batch[0])
+    if LONGBERT:
+        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks = batch 
+    else:
+        input_ids, labels_type, labels_bio, labels_boundary, attention_masks, subword_masks, cls_pos, sliding_window_pos = batch 
+    input_ids = torch.stack(input_ids).cuda()
+    labels_type = torch.stack(labels_type).cuda()
+    labels_bio = torch.stack(labels_bio).cuda()
+    labels_boundary = torch.stack(labels_boundary).cuda()
+    attention_masks = torch.stack(attention_masks).cuda()
+    subword_masks = torch.stack(subword_masks).cuda()
+    active_padding_mask = attention_masks.view(-1) == 1
+    
+    boundary_matrix = bound_to_matrix(labels_boundary).cuda()
+    pad_matrix = []
+    for i in range(bs):
+        tmp = attention_masks[i].clone()
+        tmp = tmp.view(MAX_LEN, 1)
+        tmp_t = tmp.transpose(0, 1)
+        mat = tmp * tmp_t
+        pad_matrix.append(mat)
+    pad_matrix = torch.stack(pad_matrix, 0)
+    matrix_padding_mask = pad_matrix.view(-1) == 1
+
+    with torch.no_grad():
+        with autocast():
+            if BASELINE:
+                ner_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+                ner_loss_ = bio_loss(
+                    ner_logits.view(-1, len(LABEL_BIO))[active_padding_mask], labels_bio.view(-1)[active_padding_mask])
+                loss = ner_loss_
+            else:
+                ner_logits, boundary_logits, type_logits, seg_logits = model(input_ids=input_ids, attention_mask=attention_masks)
+
+
+    text_id=sliding_window_pos[0][1]
+    attention_masks_i=attention_masks[0]
+    attention_masks_i=attention_masks_i==1
+    ner_logits_i=ner_logits.argmax(-1)[0]
+    ner_logits_i=ner_logits_i[attention_masks_i].cpu().numpy()
+    subword_masks_i=subword_masks[0]
+    subword_masks_i=subword_masks_i[attention_masks_i].cpu().numpy()
+    df=submit_formatting(ner_logits_i, subword_masks_i, text_id)
+    df_all=df_all.append(df,ignore_index=True)
+    try:
+        text_id=sliding_window_pos[1][1]
+        attention_masks_i=attention_masks[1]
+        attention_masks_i=attention_masks_i==1
+        ner_logits_i=ner_logits.argmax(-1)[1]
+        ner_logits_i=ner_logits_i[attention_masks_i].cpu().numpy()
+        subword_masks_i=subword_masks[1]
+        subword_masks_i=subword_masks_i[attention_masks_i].cpu().numpy()
+        df=submit_formatting(ner_logits_i, subword_masks_i, text_id)
+        df_all=df_all.append(df,ignore_index=True)
+    except:
+        pass
+    
+    pbar.update()   
+
+    
+df_all.sort_values(by=['id', 'class'], inplace=True) 
+df_all.to_csv('output.csv', index=False)
 print()
